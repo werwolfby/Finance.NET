@@ -625,6 +625,102 @@ public class YahooFinanceServiceTests
         Assert.That(result.Count(), Is.EqualTo(expectedCnt));
     }
 
+    [Test]
+    public async Task GetIntradayRecordsAsync_WithResponse_ReturnsResult()
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
+        SetupHttpJsonFileResponse(filePath);
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetIntradayRecordsAsync(
+            "IBM",
+            new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
+            EInterval.Interval_15Min)).ToList();
+
+        // Assert
+        Assert.That(result, Is.Not.Empty);
+        Assert.That(result.All(e => e.Open > 0 && e.High > 0 && e.Low > 0 && e.Close > 0));
+        Assert.That(result.All(e => e.High >= e.Low));
+        Assert.That(result.Any(e => e.Volume > 0));
+
+        // sub-daily granularity: more than one record per calendar day
+        Assert.That(result.Count, Is.GreaterThan(result.Select(e => e.DateTime.Date).Distinct().Count()));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_ResponseHasBarsBeyondEndDate_ExcludesThem()
+    {
+        // Yahoo appends the current partial bar to the chart response even when it lies
+        // outside the requested period2 - the fixture contains such a bar (2026-08-05).
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
+        SetupHttpJsonFileResponse(filePath);
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetIntradayRecordsAsync(
+            "IBM",
+            new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
+            EInterval.Interval_15Min)).ToList();
+
+        // Assert
+        Assert.That(result.Select(e => e.DateTime.Date), Is.All.InRange(new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc)));
+        Assert.That(result.Any(e => e.DateTime.Date == new DateTime(2026, 8, 5, 0, 0, 0, DateTimeKind.Utc)), Is.False);
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_NoResponse_Throws()
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "empty.json");
+        SetupHttpJsonFileResponse(filePath);
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act + Assert
+        Assert.ThrowsAsync<FinanceNetNoDataException>(async () => await service.GetIntradayRecordsAsync(
+            "IBM",
+            new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
+            EInterval.Interval_15Min));
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_StartAfterEnd_Throws()
+    {
+        // Arrange
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act + Assert
+        Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetIntradayRecordsAsync(
+            "IBM",
+            new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
+            EInterval.Interval_15Min));
+    }
+
     private void SetupHttpHtmlFileResponse(string filePath)
     {
         _mockHandler

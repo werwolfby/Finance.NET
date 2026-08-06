@@ -55,6 +55,17 @@ public interface IYahooFinanceService
     Task<IEnumerable<Record>> GetRecordsAsync(string symbol, DateTime? startDate = null, DateTime? endDate = null, CancellationToken token = default);
 
     /// <summary>
+    /// Retrieves intraday records.
+    /// </summary>
+    /// <param name="symbol">The symbol of the quote (e.g., "AAPL" for Apple).</param>
+    /// <param name="startDate">The start date.</param>
+    /// <param name="endDate">Optional end date. If not provided, the current date.</param>
+    /// <param name="interval">The time interval between data points. Default is 15 minutes.</param>
+    /// <param name="token">An optional cancellation token to cancel the operation if needed.</param>
+    /// <returns>The task result contains an enumerable collection of <see cref="IntradayRecord"/>.</returns>
+    Task<IEnumerable<IntradayRecord>> GetIntradayRecordsAsync(string symbol, DateTime startDate, DateTime? endDate = null, EInterval interval = EInterval.Interval_15Min, CancellationToken token = default);
+
+    /// <summary>
     /// Retrieves a single quote.
     /// </summary>
     /// <param name="symbol">The symbol of the quote (e.g., "AAPL" for Apple).</param>

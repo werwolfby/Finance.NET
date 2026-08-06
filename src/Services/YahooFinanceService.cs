@@ -92,6 +92,12 @@ public class YahooFinanceService : IYahooFinanceService
     }
 
     /// <inheritdoc />
+    public Task<IEnumerable<IntradayRecord>> GetIntradayRecordsAsync(string symbol, DateTime startDate, DateTime? endDate = null, EInterval interval = EInterval.Interval_15Min, CancellationToken token = default)
+    {
+        throw new NotImplementedException();
+    }
+
+    /// <inheritdoc />
     public async Task<Quote> GetQuoteAsync(string symbol, CancellationToken token = default)
     {
         var quotes = await GetQuotesAsync([symbol], token).ConfigureAwait(false);
