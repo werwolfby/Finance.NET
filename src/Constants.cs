@@ -29,6 +29,7 @@ internal static class Constants
     public const string YahooConsentCollectUrl = "https://consent.yahoo.com/v2/collectConsent";
     public const string YahooCrumbApiUrl = "https://query1.finance.yahoo.com/v1/test/getcrumb";
     public const string YahooQuoteApiUrl = "https://query1.finance.yahoo.com/v7/finance/quote";
+    public const string YahooChartApiUrl = "https://query1.finance.yahoo.com/v8/finance/chart";
 
     #endregion
 

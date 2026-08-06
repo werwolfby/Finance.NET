@@ -92,10 +92,121 @@ public class YahooFinanceService : IYahooFinanceService
     }
 
     /// <inheritdoc />
-    public Task<IEnumerable<IntradayRecord>> GetIntradayRecordsAsync(string symbol, DateTime startDate, DateTime? endDate = null, EInterval interval = EInterval.Interval_15Min, CancellationToken token = default)
+    public async Task<IEnumerable<IntradayRecord>> GetIntradayRecordsAsync(string symbol, DateTime startDate, DateTime? endDate = null, EInterval interval = EInterval.Interval_15Min, CancellationToken token = default)
     {
-        throw new NotImplementedException();
+        if (endDate != null && startDate > endDate)
+        {
+            throw new FinanceNetException("startDate earlier than endDate");
+        }
+        endDate ??= DateTime.UtcNow.Date;
+        if (endDate.Value.Date > DateTime.UtcNow.Date)
+        {
+            endDate = DateTime.UtcNow.Date;
+        }
+
+        await _yahooSession.RefreshSessionAsync(token).ConfigureAwait(false);
+        var httpClient = _httpClientFactory.CreateClient(Constants.YahooHttpClientName);
+
+        // period2 is exclusive, so ask for the day after the requested end date
+        var period1 = Helper.ToUnixTime(startDate.Date);
+        var period2 = Helper.ToUnixTime(endDate.Value.Date.AddDays(1));
+
+        var url = $"{Constants.YahooChartApiUrl}/{symbol}" +
+            $"?interval={ToYahooInterval(interval)}" +
+            $"&period1={period1}" +
+            $"&period2={period2}";
+        try
+        {
+            return await _retryPolicy.ExecuteAsync(async ct =>
+            {
+                var jsonContent = await Helper.FetchJsonDocumentAsync(httpClient, _logger, url, ct).ConfigureAwait(false);
+                var parsedData = JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent) ?? throw new FinanceNetException("Invalid data returned by Yahoo");
+                var chart = parsedData.Chart ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
+
+                if (chart.Error != null)
+                {
+                    throw new FinanceNetException($"Received an error response from Yahoo: {chart.Error}");
+                }
+                var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
+
+                var records = ParseIntradayRecords(chartResult, startDate.Date, endDate.Value.Date);
+                return records.IsNullOrEmpty()
+                    ? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}")
+                    : records;
+            }, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not FinanceNetNoDataException)
+        {
+            throw new FinanceNetException($"No intraday records found for {symbol}", ex);
+        }
     }
+
+    /// <summary>
+    /// Maps the shared interval enum onto the notation the Yahoo chart endpoint expects ("15m" rather than "15min").
+    /// </summary>
+    private static string ToYahooInterval(EInterval interval) => interval switch
+    {
+        EInterval.Interval_1Min => "1m",
+        EInterval.Interval_5Min => "5m",
+        EInterval.Interval_15Min => "15m",
+        EInterval.Interval_30Min => "30m",
+        EInterval.Interval_60Min => "60m",
+        _ => throw new NotSupportedException($"Unsupported interval {interval}"),
+    };
+
+    /// <summary>
+    /// Projects the column-oriented chart payload into records, in exchange-local time.
+    /// </summary>
+    /// <remarks>
+    /// Yahoo appends the current partial bar even when it lies outside the requested period,
+    /// so the range is re-applied here rather than trusted from the response.
+    /// </remarks>
+    private static List<IntradayRecord> ParseIntradayRecords(ChartResult chartResult, DateTime startDate, DateTime endDate)
+    {
+        var records = new List<IntradayRecord>();
+        var timestamps = chartResult.Timestamp;
+        var quote = chartResult.Indicators?.Quote?.FirstOrDefault();
+        if (timestamps == null || quote == null)
+        {
+            return records;
+        }
+        var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
+
+        for (var i = 0; i < timestamps.Count; i++)
+        {
+            var open = ElementAtOrNull(quote.Open, i);
+            var high = ElementAtOrNull(quote.High, i);
+            var low = ElementAtOrNull(quote.Low, i);
+            var close = ElementAtOrNull(quote.Close, i);
+            if (open == null || high == null || low == null || close == null)
+            {
+                // Yahoo emits null columns for halted or untraded buckets
+                continue;
+            }
+            var dateTime = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset);
+            if (dateTime.Date < startDate || dateTime.Date > endDate)
+            {
+                continue;
+            }
+            records.Add(new IntradayRecord
+            {
+                DateTime = dateTime,
+                Open = open.Value,
+                High = high.Value,
+                Low = low.Value,
+                Close = close.Value,
+                Volume = ElementAtOrNull(quote.Volume, i) ?? 0,
+            });
+        }
+        return records;
+    }
+
+    private static T? ElementAtOrNull<T>(List<T?>? values, int index) where T : struct
+        => values != null && index < values.Count ? values[index] : null;
 
     /// <inheritdoc />
     public async Task<Quote> GetQuoteAsync(string symbol, CancellationToken token = default)
