@@ -105,6 +105,35 @@ public class YahooFinanceTests
         }
     }
 
+    [TestCase("TSLA", EInterval.Interval_15Min)]   // Tesla (Stock - Nasdaq)
+    [TestCase("SAP.DE", EInterval.Interval_60Min)] // SAP SE (Stock - Xetra)
+    [TestCase("VOO", EInterval.Interval_5Min)]     // Vanguard S&P 500 (ETF)
+    [TestCase("BTC-USD", EInterval.Interval_30Min)]// Bitcoin - USD (Crypto)
+    public async Task GetIntradayRecordsAsync_Success(string symbol, EInterval interval)
+    {
+        var startDate = DateTime.UtcNow.AddDays(-5).Date;
+
+        var records = (await _service.GetIntradayRecordsAsync(symbol, startDate, null, interval)).ToList();
+
+        Assert.That(records, Is.Not.Empty);
+        Assert.That(records.All(e => e.Open > 0 && e.High > 0 && e.Low > 0 && e.Close > 0), Is.True);
+        Assert.That(records.All(e => e.High >= e.Low), Is.True);
+        Assert.That(records.All(e => e.DateTime.Date >= startDate), Is.True);
+
+        // sub-daily granularity: more than one record per calendar day
+        Assert.That(records.Count, Is.GreaterThan(records.Select(e => e.DateTime.Date).Distinct().Count()));
+
+        Assert.Pass($"cnt = {records.Count}, first = {records[0].DateTime:yyyy-MM-dd HH:mm}, last = {records[^1].DateTime:yyyy-MM-dd HH:mm}");
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_InvalidSymbol_Throws()
+    {
+        var startDate = DateTime.UtcNow.AddDays(-5).Date;
+
+        Assert.ThrowsAsync<FinanceNetException>(async () => await _service.GetIntradayRecordsAsync("TESTING.NET", startDate));
+    }
+
     [TestCase("TSLA", true)]      // Tesla (Stock - Nasdaq)
     [TestCase("SAP.DE", true)]    // SAP SE (Stock - Xetra)
     [TestCase("8058.T", true)]    // Mitsubishi (Stock - Tokyo)
