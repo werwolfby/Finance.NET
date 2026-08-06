@@ -360,6 +360,57 @@ public async Task Run(IYahooFinanceService yahooService)
 
 </details>
 
+<details><summary><code>GetIntradayRecordsAsync</code></summary>
+
+#### Description
+
+Retrieves intraday (sub-daily) stock market data for a specified asset, at a chosen time interval. Unlike the Alpha Vantage equivalent, this requires no API key.
+
+Yahoo limits how far back intraday history reaches - roughly the last 7 days for the 1-minute interval, and around 60 days for the wider intervals. Timestamps are returned in the exchange's local time.
+
+#### Parameters
+
+* `string symbol`: The symbol of the quote (e.g., `"AAPL"` for Apple).
+* `DateTime startDate`: Start date for retrieving intraday records.
+* `DateTime? endDate`: (Optional) End date for retrieving intraday records. Defaults to the current date if not provided.
+* `EInterval interval`: (Optional) The time interval between data points. Defaults to `EInterval.Interval_15Min`.
+* `CancellationToken token`: (Optional) Cancellation token to cancel the operation if needed.
+
+#### Returns
+
+A task that resolves to an `IEnumerable<IntradayRecord>`, where each `IntradayRecord` represents a single bar with the following properties:
+
+| Property   | Type       | Description                                            | Example             |
+|------------|------------|--------------------------------------------------------|---------------------|
+| `DateTime` | `DateTime` | The date and time of the bar, in exchange-local time.  | 2025-01-01 09:30:00 |
+| `Open`     | `double`   | The opening price.                                     | 150.25              |
+| `High`     | `double`   | The highest price during the interval.                 | 155.00              |
+| `Low`      | `double`   | The lowest price during the interval.                  | 148.50              |
+| `Close`    | `double`   | The closing price at the end of the interval.          | 152.75              |
+| `Volume`   | `long`     | The trading volume (number of shares traded).          | 1,000,000           |
+
+#### Example
+
+```csharp
+public async Task Run(IYahooFinanceService yahooService)
+{
+    // Retrieve 15-minute bars for Apple Inc. for the last 5 days
+    var startDate = DateTime.UtcNow.AddDays(-5);
+
+    var records = await yahooService.GetIntradayRecordsAsync("AAPL", startDate, null, EInterval.Interval_15Min);
+
+    foreach (var record in records)
+    {
+        Console.WriteLine($"DateTime: {record.DateTime:yyyy-MM-dd HH:mm}");
+        Console.WriteLine($"Open: {record.Open:C}");
+        Console.WriteLine($"Close: {record.Close:C}");
+        Console.WriteLine();
+    }
+}
+```
+
+</details>
+
 <details><summary><code>GetQuoteAsync</code></summary>
 
 #### Description
