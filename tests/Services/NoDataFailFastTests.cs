@@ -79,12 +79,11 @@ public class NoDataFailFastTests
     [Test]
     public void Yahoo_GetRecordsAsync_NoRecords_FailsFastWithoutRetrying()
     {
-        // A real history page for a symbol with no bars in range: correct table, no rows.
+        // A real chart response for a symbol with no bars in range: correct shape, no timestamps.
         SetUpResponse(
-            "<html><head><title>IBM</title></head><body><table class=\"table\"><thead><tr>" +
-            "<th>Date</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Adj Close</th><th>Volume</th>" +
-            "</tr></thead><tbody></tbody></table></body></html>",
-            "text/html");
+            "{\"chart\":{\"result\":[{\"meta\":{\"symbol\":\"BOGUSTICKER\",\"gmtoffset\":0}," +
+            "\"timestamp\":[],\"indicators\":{\"quote\":[{}]}}],\"error\":null}}",
+            "application/json");
         var service = new YahooFinanceService(
             Mock.Of<ILogger<YahooFinanceService>>(),
             _mockHttpClientFactory.Object,

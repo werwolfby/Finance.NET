@@ -383,7 +383,7 @@ public class YahooFinanceService : IYahooFinanceService
     }
 
     /// <inheritdoc />
-    public async Task<IEnumerable<Record>> GetRecordsAsync(string symbol, DateTime? startDate = null, DateTime? endDate = null, CancellationToken token = default)
+    public async Task<IEnumerable<Record>> GetRecordsAsync(string symbol, DateTime? startDate = null, DateTime? endDate = null, EYahooInterval interval = EYahooInterval.Daily, CancellationToken token = default)
     {
         await _yahooSession.RefreshSessionAsync(token).ConfigureAwait(false);
         var httpClient = _httpClientFactory.CreateClient(Constants.YahooHttpClientName);

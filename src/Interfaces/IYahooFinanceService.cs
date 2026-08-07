@@ -50,9 +50,10 @@ public interface IYahooFinanceService
     /// <param name="symbol">The symbol of the quote (e.g., "AAPL" for Apple).</param>
     /// <param name="startDate">Optional start date for retrieving historical records. If not provided, current date -7 days.</param>
     /// <param name="endDate">Optional end date for retrieving historical records. If not provided, current date.</param>
+    /// <param name="interval">The granularity of the records. Default is daily. Unlike intraday data, these reach back to the instrument's first trading day.</param>
     /// <param name="token">An optional cancellation token to cancel the operation if needed.</param>
     /// <returns>The task result contains an enumerable of record.</returns>
-    Task<IEnumerable<Record>> GetRecordsAsync(string symbol, DateTime? startDate = null, DateTime? endDate = null, CancellationToken token = default);
+    Task<IEnumerable<Record>> GetRecordsAsync(string symbol, DateTime? startDate = null, DateTime? endDate = null, EYahooInterval interval = EYahooInterval.Daily, CancellationToken token = default);
 
     /// <summary>
     /// Retrieves intraday records.

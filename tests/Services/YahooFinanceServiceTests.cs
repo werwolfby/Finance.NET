@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Finance.Net.Enums;
 using Finance.Net.Exceptions;
 using Finance.Net.Interfaces;
+using Finance.Net.Models.Yahoo;
 using Finance.Net.Services;
 using Finance.Net.Utilities;
 using Microsoft.Extensions.Logging;
@@ -431,18 +432,16 @@ public class YahooFinanceServiceTests
     public async Task GetRecordsAsync_WithResponse_ReturnsResult()
     {
         // Arrange
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.html");
-        SetupHttpHtmlFileResponse(filePath);
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        SetupHttpJsonFileResponse(filePath);
         var service = new YahooFinanceService(
             _mockLogger.Object,
             _mockHttpClientFactory.Object,
             _mockPolicyRegistry.Object,
             _mockYahooSession.Object);
 
-        DateTime startDate = default;
-
         // Act
-        var result = await service.GetRecordsAsync("IBM", startDate);
+        var result = (await service.GetRecordsAsync("NVDA", new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc))).ToList();
 
         // Assert
         Assert.That(result, Is.Not.Empty);
@@ -451,49 +450,157 @@ public class YahooFinanceServiceTests
         Assert.That(result.All(e => e.AdjustedClose != null));
         Assert.That(result.All(e => e.Low != null));
         Assert.That(result.All(e => e.High != null));
+        Assert.That(result.Select(e => e.Date), Is.Unique);
     }
-    [Test]
-    public void GetRecordsAsync_NoResponse_Throws()
-    {
-        _mockHandler
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent("", Encoding.UTF8, "text/html"),
-            });
-        _mockHttpClientFactory.Setup(e => e.CreateClient(It.IsAny<string>())).Returns(new HttpClient(_mockHandler.Object));
 
+    [Test]
+    public async Task GetRecordsAsync_Always_ReturnsNewestFirst()
+    {
+        // The HTML history page listed newest first and Alpha Vantage does the same,
+        // so callers depend on this ordering.
         // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        SetupHttpJsonFileResponse(filePath);
         var service = new YahooFinanceService(
             _mockLogger.Object,
             _mockHttpClientFactory.Object,
             _mockPolicyRegistry.Object,
             _mockYahooSession.Object);
 
-        DateTime startDate = default;
+        // Act
+        var result = (await service.GetRecordsAsync("NVDA", new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc))).ToList();
+
+        // Assert
+        Assert.That(result, Is.Ordered.Descending.By(nameof(Record.Date)));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_Always_ReturnsNewestFirst()
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
+        SetupHttpJsonFileResponse(filePath);
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
 
         // Act
-        var exception = Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetRecordsAsync("IBM", startDate));
-        Assert.That(exception.InnerException.Message, Does.Contain("received 200, but no html content"));
+        var result = (await service.GetIntradayRecordsAsync(
+            "IBM",
+            new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
+            EInterval.Interval_15Min)).ToList();
+
+        // Assert
+        Assert.That(result, Is.Ordered.Descending.By(nameof(IntradayRecord.DateTime)));
     }
+
+    [Test]
+    public async Task GetRecordsAsync_WithCorporateActions_MapsDividendsAndSplits()
+    {
+        // The fixture is NVDA around its 10:1 split on 2024-06-10 and its dividend the day after.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        SetupHttpJsonFileResponse(filePath);
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetRecordsAsync("NVDA", new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc))).ToList();
+
+        // Assert
+        var splitDay = result.Single(e => e.Date.Date == new DateTime(2024, 6, 10, 0, 0, 0, DateTimeKind.Utc));
+        Assert.That(splitDay.SplitCoefficient, Is.EqualTo(10m));
+
+        var dividendDay = result.Single(e => e.Date.Date == new DateTime(2024, 6, 11, 0, 0, 0, DateTimeKind.Utc));
+        Assert.That(dividendDay.Dividend, Is.EqualTo(0.01m));
+
+        // days without a corporate action carry none
+        Assert.That(result.Count(e => e.SplitCoefficient != null), Is.EqualTo(1));
+        Assert.That(result.Count(e => e.Dividend != null), Is.EqualTo(1));
+    }
+
+    [TestCase(EYahooInterval.Daily, "1d")]
+    [TestCase(EYahooInterval.Weekly, "1wk")]
+    [TestCase(EYahooInterval.Monthly, "1mo")]
+    public async Task GetRecordsAsync_ByInterval_RequestsMatchingGranularity(EYahooInterval interval, string expected)
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        await service.GetRecordsAsync("NVDA", new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc), interval);
+
+        // Assert
+        Assert.That(requests, Has.Count.EqualTo(1));
+        Assert.That(requests[0], Does.Contain($"interval={expected}"));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_DeepHistory_IsNotTruncated()
+    {
+        // Daily data is not subject to the intraday retention window, so a 40 year
+        // range must go out as a single un-clamped request.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        var startDate = DateTime.UtcNow.Date.AddYears(-40);
+
+        // Act
+        await service.GetRecordsAsync("NVDA", startDate);
+
+        // Assert
+        Assert.That(requests, Has.Count.EqualTo(1));
+        var requestedPeriod1 = long.Parse(Regex.Match(requests[0], @"period1=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
+        Assert.That(requestedPeriod1, Is.EqualTo(Helper.ToUnixTime(startDate)));
+    }
+
+    [Test]
+    public void GetRecordsAsync_NoResponse_Throws()
+    {
+        // Arrange
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, "");
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act + Assert
+        Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetRecordsAsync("IBM", default));
+    }
+
     [Test]
     public void GetRecordsAsync_EmptyResponse_Throws()
     {
         // Arrange
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "empty.html");
-        SetupHttpHtmlFileResponse(filePath);
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "empty.json");
+        SetupHttpJsonFileResponse(filePath);
         var service = new YahooFinanceService(
             _mockLogger.Object,
             _mockHttpClientFactory.Object,
             _mockPolicyRegistry.Object,
             _mockYahooSession.Object);
 
-        DateTime startDate = default;
-
-        // Act
-        var exception = Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetRecordsAsync("IBM", startDate));
-        Assert.That(exception.InnerException.Message, Does.Contain("table is null"));
+        // Act + Assert
+        Assert.ThrowsAsync<FinanceNetNoDataException>(async () => await service.GetRecordsAsync("IBM", default));
     }
 
     [Test]

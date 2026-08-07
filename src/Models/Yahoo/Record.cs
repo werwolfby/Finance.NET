@@ -41,5 +41,16 @@ public record Record
     /// The trading volume.
     /// </summary>
     public long? Volume { get; set; }
+
+    /// <summary>
+    /// The cash dividend that went ex on this date, or <c>null</c> if none did.
+    /// </summary>
+    public decimal? Dividend { get; set; }
+
+    /// <summary>
+    /// The ratio of a stock split effective on this date - 10 for a 10:1 split - or
+    /// <c>null</c> if no split occurred.
+    /// </summary>
+    public decimal? SplitCoefficient { get; set; }
 }
 
