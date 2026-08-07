@@ -134,6 +134,46 @@ public class YahooFinanceTests
         Assert.ThrowsAsync<FinanceNetException>(async () => await _service.GetIntradayRecordsAsync("TESTING.NET", startDate));
     }
 
+    [Test]
+    public async Task GetIntradayRecordsAsync_TenYearsOfHourlyData_ReturnsWhatYahooKeeps()
+    {
+        // Yahoo keeps 730 days of hourly data, so a 10 year request is truncated rather than rejected.
+        var startDate = DateTime.UtcNow.AddYears(-10).Date;
+
+        var records = (await _service.GetIntradayRecordsAsync("MSFT", startDate, null, EInterval.Interval_60Min)).ToList();
+
+        Assert.That(records, Is.Not.Empty);
+        Assert.That(records.All(e => e.Open > 0 && e.High >= e.Low), Is.True);
+        Assert.That(records.Min(e => e.DateTime).Date, Is.GreaterThanOrEqualTo(DateTime.UtcNow.Date.AddDays(-731)));
+
+        Assert.Pass($"cnt = {records.Count}, first = {records.Min(e => e.DateTime):yyyy-MM-dd}, last = {records.Max(e => e.DateTime):yyyy-MM-dd}");
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_SpanningMultipleChunks_ReturnsContiguousMinuteBars()
+    {
+        // 1m data is capped at 8 days per request, so 20 days exercises the chunking.
+        var startDate = DateTime.UtcNow.AddDays(-20).Date;
+
+        var records = (await _service.GetIntradayRecordsAsync("MSFT", startDate, null, EInterval.Interval_1Min)).ToList();
+
+        Assert.That(records, Is.Not.Empty);
+        Assert.That(records.Select(e => e.DateTime), Is.Unique);
+        Assert.That(records.Select(e => e.DateTime.Date).Distinct().Count(), Is.GreaterThan(8));
+
+        Assert.Pass($"cnt = {records.Count}, days = {records.Select(e => e.DateTime.Date).Distinct().Count()}");
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_RangeBeyondRetention_ThrowsInvalidRequest()
+    {
+        var startDate = new DateTime(2016, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = new DateTime(2017, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        Assert.ThrowsAsync<FinanceNetInvalidRequestException>(async () =>
+            await _service.GetIntradayRecordsAsync("MSFT", startDate, endDate, EInterval.Interval_60Min));
+    }
+
     [TestCase("TSLA", true)]      // Tesla (Stock - Nasdaq)
     [TestCase("SAP.DE", true)]    // SAP SE (Stock - Xetra)
     [TestCase("8058.T", true)]    // Mitsubishi (Stock - Tokyo)
