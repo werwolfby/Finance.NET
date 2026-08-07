@@ -9,5 +9,5 @@ internal record ChartResponse
     public List<ChartResult>? Result { get; set; }
 
     [JsonProperty("error")]
-    public object? Error { get; set; }
+    public ChartError? Error { get; set; }
 }

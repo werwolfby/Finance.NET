@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -104,22 +105,62 @@ public class YahooFinanceService : IYahooFinanceService
             endDate = DateTime.UtcNow.Date;
         }
 
+        var limits = GetChartLimits(interval);
+
+        // Yahoo measures its retention window from the current instant, so the boundary date taken
+        // at midnight already sits marginally outside it - stay a day inside to avoid a 422.
+        var earliestAvailable = DateTime.UtcNow.Date.AddDays(-(limits.RetentionDays - 1));
+        if (endDate.Value.Date < earliestAvailable)
+        {
+            throw new FinanceNetInvalidRequestException(
+                $"Yahoo keeps only the last {limits.RetentionDays} days of {ToYahooInterval(interval)} data for {symbol}, " +
+                $"but the requested range ends on {endDate.Value:yyyy-MM-dd}. Request a more recent range or a wider interval.");
+        }
+
+        var effectiveStart = startDate.Date;
+        if (effectiveStart < earliestAvailable)
+        {
+            _logger.LogWarning(
+                "Yahoo keeps only the last {RetentionDays} days of {Interval} data, truncating the requested start {Requested:yyyy-MM-dd} to {Effective:yyyy-MM-dd}.",
+                limits.RetentionDays,
+                ToYahooInterval(interval),
+                startDate.Date,
+                earliestAvailable);
+            effectiveStart = earliestAvailable;
+        }
+
         await _yahooSession.RefreshSessionAsync(token).ConfigureAwait(false);
+
+        // Yahoo caps how much intraday data a single request may span, so walk the range in chunks
+        var records = new List<IntradayRecord>();
+        var endExclusive = endDate.Value.Date.AddDays(1);
+        for (var chunkStart = effectiveStart; chunkStart < endExclusive; chunkStart = chunkStart.AddDays(limits.MaxSpanDays))
+        {
+            var chunkEndExclusive = chunkStart.AddDays(limits.MaxSpanDays);
+            if (chunkEndExclusive > endExclusive)
+            {
+                chunkEndExclusive = endExclusive;
+            }
+            var chunk = await GetIntradayRecordsChunkAsync(symbol, chunkStart, chunkEndExclusive, interval, token).ConfigureAwait(false);
+            records.AddRange(chunk);
+        }
+        return records.IsNullOrEmpty()
+            ? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}")
+            : records;
+    }
+
+    private async Task<List<IntradayRecord>> GetIntradayRecordsChunkAsync(string symbol, DateTime startDate, DateTime endExclusive, EInterval interval, CancellationToken token)
+    {
         var httpClient = _httpClientFactory.CreateClient(Constants.YahooHttpClientName);
-
-        // period2 is exclusive, so ask for the day after the requested end date
-        var period1 = Helper.ToUnixTime(startDate.Date);
-        var period2 = Helper.ToUnixTime(endDate.Value.Date.AddDays(1));
-
         var url = $"{Constants.YahooChartApiUrl}/{symbol}" +
             $"?interval={ToYahooInterval(interval)}" +
-            $"&period1={period1}" +
-            $"&period2={period2}";
+            $"&period1={Helper.ToUnixTime(startDate)}" +
+            $"&period2={Helper.ToUnixTime(endExclusive)}";
         try
         {
             return await _retryPolicy.ExecuteAsync(async ct =>
             {
-                var jsonContent = await Helper.FetchJsonDocumentAsync(httpClient, _logger, url, ct).ConfigureAwait(false);
+                var jsonContent = await FetchChartJsonAsync(httpClient, url, ct).ConfigureAwait(false);
                 var parsedData = JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent) ?? throw new FinanceNetException("Invalid data returned by Yahoo");
                 var chart = parsedData.Chart ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
 
@@ -129,21 +170,75 @@ public class YahooFinanceService : IYahooFinanceService
                 }
                 var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
 
-                var records = ParseIntradayRecords(chartResult, startDate.Date, endDate.Value.Date);
-                return records.IsNullOrEmpty()
-                    ? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}")
-                    : records;
+                // filter against this chunk, so the trailing bar Yahoo appends cannot be added once per chunk
+                return ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1));
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception ex) when (ex is not FinanceNetNoDataException)
+        catch (FinanceNetNoDataException)
+        {
+            // a quiet chunk is not fatal - a neighbouring one may still carry records
+            return [];
+        }
+        catch (Exception ex) when (ex is not FinanceNetInvalidRequestException)
         {
             throw new FinanceNetException($"No intraday records found for {symbol}", ex);
         }
     }
+
+    /// <summary>
+    /// Fetches the chart payload, turning the provider's rejection of a request into a
+    /// <see cref="FinanceNetInvalidRequestException"/> so the retry policy leaves it alone.
+    /// </summary>
+    private async Task<string> FetchChartJsonAsync(HttpClient httpClient, string url, CancellationToken token)
+    {
+        var response = await httpClient.GetAsync(url, token).ConfigureAwait(false);
+        var jsonContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+        if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
+        {
+            var description = TryReadChartErrorDescription(jsonContent);
+            throw new FinanceNetInvalidRequestException($"Yahoo rejected the request: {description ?? jsonContent}");
+        }
+        response.EnsureSuccessStatusCode();
+
+        _logger?.LogDebug("jsonContent={JsonContent}", jsonContent.Minify());
+        return jsonContent;
+    }
+
+    private static string? TryReadChartErrorDescription(string jsonContent)
+    {
+        try
+        {
+            return JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent)?.Chart?.Error?.Description;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// How much intraday history Yahoo keeps per interval, and how much of it one request may span.
+    /// </summary>
+    /// <remarks>
+    /// These are two different limits. 1m data is capped per request ("only 8 days worth of 1m
+    /// granularity data are allowed to be fetched per request"), which chunking works around.
+    /// The retention window is how far back the data exists at all, which chunking cannot extend.
+    /// </remarks>
+    private static (int MaxSpanDays, int RetentionDays) GetChartLimits(EInterval interval) => interval switch
+    {
+        // 8 days are allowed per request; stay a day inside that to keep boundaries safe
+        EInterval.Interval_1Min => (7, 30),
+        EInterval.Interval_5Min => (60, 60),
+        EInterval.Interval_15Min => (60, 60),
+        EInterval.Interval_30Min => (60, 60),
+        EInterval.Interval_60Min => (730, 730),
+        _ => throw new NotSupportedException($"Unsupported interval {interval}"),
+    };
 
     /// <summary>
     /// Maps the shared interval enum onto the notation the Yahoo chart endpoint expects ("15m" rather than "15min").
