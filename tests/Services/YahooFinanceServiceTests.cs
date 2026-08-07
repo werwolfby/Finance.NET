@@ -606,8 +606,13 @@ public class YahooFinanceServiceTests
     [Test]
     public void GetRecordsAsync_NoRecordsInPeriod_ThrowsNoData()
     {
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records_empty_period.html");
-        SetupHttpHtmlFileResponse(filePath);
+        // A range with no trading day in it (a weekend, or today for a mutual fund
+        // whose NAV is not out yet) comes back with the correct shape and no bars.
+        // That is a correct answer with no rows, not a broken response.
+        SetupHttpResponseCapturingRequests(
+            HttpStatusCode.OK,
+            "{\"chart\":{\"result\":[{\"meta\":{\"symbol\":\"FAVQX\",\"gmtoffset\":0}," +
+            "\"timestamp\":[],\"indicators\":{\"quote\":[{}]}}],\"error\":null}}");
         var service = new YahooFinanceService(
             _mockLogger.Object,
             _mockHttpClientFactory.Object,
@@ -619,33 +624,6 @@ public class YahooFinanceServiceTests
         Assert.That(exception.Message, Does.Contain("FAVQX"));
         Assert.That(exception.InnerException, Is.Null);
     }
-
-    [Test]
-    public void GetRecordsAsync_MissingHeadersWithoutErrorCell_Throws()
-    {
-        _mockHandler
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(
-                    "<html><body><table class=\"table\"><thead><tr><th>Date</th><th>Open</th></tr></thead>" +
-                    "<tbody><tr><td>Jan 2, 2026</td><td>1.00</td></tr></tbody></table></body></html>",
-                    Encoding.UTF8,
-                    "text/html"),
-            });
-        _mockHttpClientFactory.Setup(e => e.CreateClient(It.IsAny<string>())).Returns(new HttpClient(_mockHandler.Object));
-        var service = new YahooFinanceService(
-            _mockLogger.Object,
-            _mockHttpClientFactory.Object,
-            _mockPolicyRegistry.Object,
-            _mockYahooSession.Object);
-
-        var exception = Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetRecordsAsync("IBM", new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc)));
-
-        Assert.That(exception.InnerException.Message, Does.Contain("Headers are missing"));
-    }
-
     [Test]
     public void GetInstrumentsAsync_NoResponse_Throws()
     {

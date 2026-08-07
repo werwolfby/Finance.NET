@@ -136,7 +136,7 @@ internal static class Helper
         throw new FormatException($"Invalid date format {dateString}");
     }
 
-    public static string GetDescription(this EInterval value)
+    public static string GetDescription(this Enum value)
     {
         var field = value.GetType().GetField(value.ToString());
         if (field == null)
@@ -145,7 +145,7 @@ internal static class Helper
         }
 
         var attribute = (DescriptionAttribute)Attribute.GetCustomAttribute(field, typeof(DescriptionAttribute));
-        return attribute.Description;
+        return attribute?.Description ?? "";
     }
     public static string CreateRandomUserAgent(Func<int, int, int> random)
     {

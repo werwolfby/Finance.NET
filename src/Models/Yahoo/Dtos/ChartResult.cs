@@ -13,4 +13,7 @@ internal record ChartResult
 
     [JsonProperty("indicators")]
     public ChartIndicators? Indicators { get; set; }
+
+    [JsonProperty("events")]
+    public ChartEvents? Events { get; set; }
 }

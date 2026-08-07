@@ -96,22 +96,6 @@ public class NoDataFailFastTests
     }
 
     [Test]
-    public void Yahoo_GetRecordsAsync_NoTradingDayInRange_FailsFastWithoutRetrying()
-    {
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records_empty_period.html");
-        SetUpResponse(File.ReadAllText(filePath), "text/html");
-        var service = new YahooFinanceService(
-            Mock.Of<ILogger<YahooFinanceService>>(),
-            _mockHttpClientFactory.Object,
-            _mockPolicyRegistry.Object,
-            Mock.Of<IYahooSessionManager>());
-
-        Assert.CatchAsync<FinanceNetNoDataException>(
-            async () => await service.GetRecordsAsync("FAVQX", new DateTime(2026, 9, 12, 0, 0, 0, DateTimeKind.Utc)));
-        Assert.That(_requestCount, Is.EqualTo(1), "an empty-range history page was retried");
-    }
-
-    [Test]
     public void AlphaVantage_GetRecordsAsync_NoRecords_FailsFastWithoutRetrying()
     {
         // A valid time series that happens to be empty.

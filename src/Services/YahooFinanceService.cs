@@ -144,6 +144,9 @@ public class YahooFinanceService : IYahooFinanceService
             var chunk = await GetIntradayRecordsChunkAsync(symbol, chunkStart, chunkEndExclusive, interval, token).ConfigureAwait(false);
             records.AddRange(chunk);
         }
+
+        // newest first, matching GetRecordsAsync and the Alpha Vantage records
+        records.Reverse();
         return records.IsNullOrEmpty()
             ? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}")
             : records;
@@ -389,22 +392,34 @@ public class YahooFinanceService : IYahooFinanceService
         var httpClient = _httpClientFactory.CreateClient(Constants.YahooHttpClientName);
 
         startDate ??= DateTime.UtcNow.AddDays(-7).Date;
-
         endDate ??= DateTime.UtcNow.Date;
-        endDate = endDate.Value.AddDays(1).Date;
 
+        // period2 is exclusive, so ask for the day after the requested end date
         var period1 = Helper.ToUnixTime(startDate.Value.Date);
-        var period2 = Helper.ToUnixTime(endDate.Value.Date);
+        var period2 = Helper.ToUnixTime(endDate.Value.Date.AddDays(1));
 
-        var url = $"{Constants.YahooQuoteHtmlUrl}/{symbol}/history/?period1={period1}&period2={period2}".ToLowerInvariant();
+        // daily and coarser data is not subject to an intraday retention window, so the range
+        // goes out unclamped and in one request - it reaches the first trading day
+        var url = $"{Constants.YahooChartApiUrl}/{symbol}" +
+            $"?interval={interval.GetDescription()}" +
+            $"&period1={period1}" +
+            $"&period2={period2}" +
+            "&events=div%2Csplit";
         try
         {
             return await _retryPolicy.ExecuteAsync(async ct =>
             {
-                var document = await Helper.FetchHtmlDocumentAsync(httpClient, _logger, url, ct).ConfigureAwait(false);
+                var jsonContent = await FetchChartJsonAsync(httpClient, url, ct).ConfigureAwait(false);
+                var parsedData = JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent) ?? throw new FinanceNetException("Invalid data returned by Yahoo");
+                var chart = parsedData.Chart ?? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}");
 
-                await CheckAndDeclineConsentAsync(document, ct).ConfigureAwait(false);
-                var records = YahooHtmlParser.ParseHistoryRecords(document, _logger);
+                if (chart.Error != null)
+                {
+                    throw new FinanceNetException($"Received an error response from Yahoo: {chart.Error}");
+                }
+                var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}");
+
+                var records = ParseRecords(chartResult, startDate.Value.Date, endDate.Value.Date);
                 return records.IsNullOrEmpty() ? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}") : records;
             }, token).ConfigureAwait(false);
         }
@@ -412,11 +427,84 @@ public class YahooFinanceService : IYahooFinanceService
         {
             throw;
         }
-        catch (Exception ex) when (ex is not FinanceNetNoDataException)
+        catch (Exception ex) when (ex is not FinanceNetNoDataException and not FinanceNetInvalidRequestException)
         {
             throw new FinanceNetException("No records found", ex);
         }
     }
+
+    /// <summary>
+    /// Projects the column-oriented chart payload into records, attaching any corporate action
+    /// that fell on the same date.
+    /// </summary>
+    private static List<Record> ParseRecords(ChartResult chartResult, DateTime startDate, DateTime endDate)
+    {
+        var records = new List<Record>();
+        var timestamps = chartResult.Timestamp;
+        var quote = chartResult.Indicators?.Quote?.FirstOrDefault();
+        if (timestamps == null || quote == null)
+        {
+            return records;
+        }
+        var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
+        var adjClose = chartResult.Indicators?.AdjClose?.FirstOrDefault()?.AdjClose;
+        var dividends = IndexEventsByDate(chartResult.Events?.Dividends, e => e.Date, offset);
+        var splits = IndexEventsByDate(chartResult.Events?.Splits, e => e.Date, offset);
+
+        for (var i = 0; i < timestamps.Count; i++)
+        {
+            var close = ElementAtOrNull(quote.Close, i);
+            if (close == null)
+            {
+                // Yahoo emits null columns for halted or untraded periods
+                continue;
+            }
+            var date = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
+            if (date < startDate || date > endDate)
+            {
+                continue;
+            }
+            records.Add(new Record
+            {
+                Date = date,
+                Open = ToDecimal(ElementAtOrNull(quote.Open, i)),
+                High = ToDecimal(ElementAtOrNull(quote.High, i)),
+                Low = ToDecimal(ElementAtOrNull(quote.Low, i)),
+                Close = ToDecimal(close),
+                AdjustedClose = ToDecimal(ElementAtOrNull(adjClose, i)) ?? ToDecimal(close),
+                Volume = ElementAtOrNull(quote.Volume, i),
+                Dividend = dividends.TryGetValue(date, out var dividend) ? ToDecimal(dividend.Amount) : null,
+                SplitCoefficient = splits.TryGetValue(date, out var split) ? ToSplitCoefficient(split) : null,
+            });
+        }
+
+        // Yahoo serves oldest first, but the HTML page this replaced listed newest first,
+        // as Alpha Vantage does - callers depend on that order.
+        records.Reverse();
+        return records;
+    }
+
+    private static Dictionary<DateTime, TEvent> IndexEventsByDate<TEvent>(Dictionary<string, TEvent>? events, Func<TEvent, long> getDate, TimeSpan offset)
+    {
+        var indexed = new Dictionary<DateTime, TEvent>();
+        if (events == null)
+        {
+            return indexed;
+        }
+        foreach (var item in events.Values)
+        {
+            var date = (Helper.UnixToDateTime(getDate(item)) ?? DateTime.UnixEpoch).Add(offset).Date;
+            indexed[date] = item;
+        }
+        return indexed;
+    }
+
+    private static decimal? ToSplitCoefficient(ChartSplit split)
+        => split.Numerator is > 0 && split.Denominator is > 0
+            ? ToDecimal(split.Numerator / split.Denominator)
+            : null;
+
+    private static decimal? ToDecimal(double? value) => value == null ? null : (decimal)value.Value;
 
     private async Task CheckAndDeclineConsentAsync(IHtmlDocument document, CancellationToken token)
     {
