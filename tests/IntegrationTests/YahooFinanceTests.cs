@@ -61,6 +61,50 @@ public class YahooFinanceTests
         Assert.That(lastRecentRecord.Date.Date >= startDate, Is.True);
     }
 
+    [Test]
+    public async Task GetRecordsAsync_FortyYears_ReachesFirstTradingDay()
+    {
+        // Daily data has no retention window, unlike intraday.
+        var startDate = DateTime.UtcNow.Date.AddYears(-40);
+
+        var records = (await _service.GetRecordsAsync("MSFT", startDate)).ToList();
+
+        Assert.That(records, Has.Count.GreaterThan(9000));
+        Assert.That(records.Select(e => e.Date), Is.Unique);
+        Assert.That(records.All(e => e.Open != null && e.Close != null && e.AdjustedClose != null), Is.True);
+        Assert.That(records.Min(e => e.Date).Year, Is.LessThanOrEqualTo(1990));
+
+        Assert.Pass($"cnt = {records.Count}, first = {records.Min(e => e.Date):yyyy-MM-dd}");
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_OverASplitAndDividend_MapsCorporateActions()
+    {
+        // NVDA split 10:1 on 2024-06-10 and paid a dividend the day after.
+        var startDate = new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc);
+
+        var records = (await _service.GetRecordsAsync("NVDA", startDate, endDate)).ToList();
+
+        Assert.That(records.Any(e => e.SplitCoefficient == 10m), Is.True);
+        Assert.That(records.Any(e => e.Dividend > 0), Is.True);
+    }
+
+    [TestCase(EYahooInterval.Daily, 200)]
+    [TestCase(EYahooInterval.Weekly, 40)]
+    [TestCase(EYahooInterval.Monthly, 10)]
+    public async Task GetRecordsAsync_ByInterval_ReturnsCoarserSeries(EYahooInterval interval, int minimumCount)
+    {
+        var startDate = DateTime.UtcNow.Date.AddYears(-1);
+
+        var records = (await _service.GetRecordsAsync("MSFT", startDate, null, interval)).ToList();
+
+        Assert.That(records, Has.Count.GreaterThanOrEqualTo(minimumCount));
+        Assert.That(records.Select(e => e.Date), Is.Unique);
+
+        Assert.Pass($"{interval}: cnt = {records.Count}");
+    }
+
     [TestCase("AAPL")]
     [TestCase("TSLA")]
 
