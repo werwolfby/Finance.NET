@@ -1,16 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Finance.Net.Enums;
 using Finance.Net.Exceptions;
 using Finance.Net.Interfaces;
 using Finance.Net.Services;
+using Finance.Net.Utilities;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Moq.Protected;
@@ -719,6 +722,142 @@ public class YahooFinanceServiceTests
             new DateTime(2026, 7, 29, 0, 0, 0, DateTimeKind.Utc),
             new DateTime(2026, 7, 27, 0, 0, 0, DateTimeKind.Utc),
             EInterval.Interval_15Min));
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_UnprocessableEntity_ThrowsWithoutRetrying()
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records_out_of_range.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.UnprocessableEntity, File.ReadAllText(filePath));
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            CreateRealPolicyRegistry(),
+            _mockYahooSession.Object);
+
+        // Act
+        var exception = Assert.ThrowsAsync<FinanceNetInvalidRequestException>(async () => await service.GetIntradayRecordsAsync(
+            "MSFT",
+            DateTime.UtcNow.AddDays(-5).Date,
+            null,
+            EInterval.Interval_60Min));
+
+        // Assert - Yahoo's own explanation is surfaced, and the call is not retried
+        Assert.That(exception.Message, Does.Contain("730 days"));
+        Assert.That(requests, Has.Count.EqualTo(1));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_RangeExceedsMaxSpanPerRequest_SplitsIntoChunks()
+    {
+        // Yahoo serves at most 8 days of 1m data per request, so a 20 day range needs several.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        await service.GetIntradayRecordsAsync(
+            "MSFT",
+            DateTime.UtcNow.AddDays(-20).Date,
+            DateTime.UtcNow.Date,
+            EInterval.Interval_1Min);
+
+        // Assert
+        Assert.That(requests, Has.Count.GreaterThan(1));
+        Assert.That(requests, Is.All.Contain("interval=1m"));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_StartBeyondRetention_ClampsToWhatYahooKeeps()
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act - 10 years of hourly data, of which Yahoo only keeps the last 730 days
+        await service.GetIntradayRecordsAsync(
+            "MSFT",
+            DateTime.UtcNow.AddYears(-10).Date,
+            DateTime.UtcNow.Date,
+            EInterval.Interval_60Min);
+
+        // Assert - the earliest period1 asked for is the retention boundary, not 10 years back
+        var earliestAllowed = Helper.ToUnixTime(DateTime.UtcNow.Date.AddDays(-730));
+        var requestedPeriod1 = requests
+            .Select(url => long.Parse(Regex.Match(url, @"period1=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture))
+            .Min();
+        Assert.That(requestedPeriod1, Is.GreaterThanOrEqualTo(earliestAllowed));
+
+        _mockLogger.Verify(
+            logger => logger.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString().Contains("730")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_RangeCompletelyBeyondRetention_ThrowsWithoutCallingYahoo()
+    {
+        // Arrange
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, "{}");
+
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act - the whole window sits outside the 30 day retention of 1m data
+        var exception = Assert.ThrowsAsync<FinanceNetInvalidRequestException>(async () => await service.GetIntradayRecordsAsync(
+            "MSFT",
+            DateTime.UtcNow.AddDays(-500).Date,
+            DateTime.UtcNow.AddDays(-400).Date,
+            EInterval.Interval_1Min));
+
+        // Assert
+        Assert.That(exception.Message, Does.Contain("30"));
+        Assert.That(requests, Is.Empty);
+    }
+
+    private IReadOnlyPolicyRegistry<string> CreateRealPolicyRegistry()
+    {
+        var registry = new Mock<IReadOnlyPolicyRegistry<string>>();
+        var policy = PollyPolicyFactory.GetRetryPolicy(3, 0, _mockLogger.Object);
+        registry.Setup(e => e.Get<AsyncPolicy>(Constants.DefaultHttpRetryPolicy)).Returns(policy);
+        registry.Setup(e => e.Get<IAsyncPolicy>(Constants.DefaultHttpRetryPolicy)).Returns(policy);
+        return registry.Object;
+    }
+
+    private List<string> SetupHttpResponseCapturingRequests(HttpStatusCode statusCode, string content)
+    {
+        var requests = new List<string>();
+        _mockHandler
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((request, _) => requests.Add(request.RequestUri.ToString()))
+            .ReturnsAsync(() => new HttpResponseMessage(statusCode)
+            {
+                Content = new StringContent(content, Encoding.UTF8, "application/json"),
+            });
+        _mockHttpClientFactory.Setup(e => e.CreateClient(It.IsAny<string>())).Returns(new HttpClient(_mockHandler.Object));
+        return requests;
     }
 
     private void SetupHttpHtmlFileResponse(string filePath)

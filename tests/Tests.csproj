@@ -103,6 +103,9 @@
 	<None Update="TestData\Yahoo\intraday_records.json">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>
+	<None Update="TestData\Yahoo\intraday_records_out_of_range.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</None>
 	<None Update="TestData\Yahoo\summary.html">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>

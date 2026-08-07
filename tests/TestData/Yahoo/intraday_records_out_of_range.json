@@ -1,0 +1,10 @@
+
+{
+  "chart": {
+    "result": null,
+    "error": {
+      "code": "Unprocessable Entity",
+      "description": "1h data not available for startTime=1470441600 and endTime=1785974400. The requested range must be within the last 730 days."
+    }
+  }
+}
