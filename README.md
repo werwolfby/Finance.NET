@@ -314,28 +314,33 @@ public async Task Run(IYahooFinanceService yahooService)
 
 #### Description
 
-Retrieves historical stock market data records for a specified asset identified by its symbol. Users can specify an optional date range.
+Retrieves historical stock market data records for a specified asset identified by its symbol. Users can specify an optional date range and granularity.
+
+Records are returned **newest first**, and the range reaches back to the instrument's first trading day - there is no retention limit as there is for intraday data.
 
 #### Parameters
 
 * `string symbol`: The symbol of the quote (e.g., `"AAPL"` for Apple).
 * `DateTime? startDate`: (Optional) Start date for retrieving historical records. Defaults to 7 days before the current date if not provided.
 * `DateTime? endDate`: (Optional) End date for retrieving historical records. Defaults to the current date if not provided.
+* `EYahooInterval interval`: (Optional) Granularity of the records - `Daily` (default), `Weekly` or `Monthly`.
 * `CancellationToken token`: (Optional) Cancellation token to cancel the operation if needed.
 
 #### Returns
 
 A task that resolves to an `IEnumerable<Record>`, where each `Record` represents a historical data point with the following properties:
 
-| Property          | Type        | Description                                                                                 | Example           |
-|-------------------|-------------|---------------------------------------------------------------------------------------------|-------------------|
-| `Date`            | `DateTime`  | The date of the record.                                                                     | 2025-01-01        |
-| `Open`            | `decimal?`  | The opening price.                                                                          | 150.25            |
-| `High`            | `decimal?`  | The highest price during the trading session.                                               | 155.00            |
-| `Low`             | `decimal?`  | The lowest price during the trading session.                                                | 148.50            |
-| `Close`           | `decimal?`  | The closing price at the end of the trading session.                                        | 152.75            |
-| `AdjustedClose`   | `decimal?`  | The adjusted closing price, accounting for stock splits and dividends.                      | 153.00            |
-| `Volume`          | `long?`     | The trading volume (number of shares traded).                                               | 10,000,000        |
+| Property           | Type        | Description                                                                     | Example           |
+|--------------------|-------------|---------------------------------------------------------------------------------|-------------------|
+| `Date`             | `DateTime`  | The date of the record.                                                         | 2025-01-01        |
+| `Open`             | `decimal?`  | The opening price.                                                              | 150.25            |
+| `High`             | `decimal?`  | The highest price during the trading session.                                   | 155.00            |
+| `Low`              | `decimal?`  | The lowest price during the trading session.                                    | 148.50            |
+| `Close`            | `decimal?`  | The closing price at the end of the trading session.                            | 152.75            |
+| `AdjustedClose`    | `decimal?`  | The adjusted closing price, accounting for stock splits and dividends.          | 153.00            |
+| `Volume`           | `long?`     | The trading volume (number of shares traded).                                   | 10,000,000        |
+| `Dividend`         | `decimal?`  | The cash dividend that went ex on this date, or `null` if none did.             | 0.24              |
+| `SplitCoefficient` | `decimal?`  | The ratio of a split effective on this date (10 for a 10:1), or `null`.         | 10                |
 
 #### Example
 
@@ -355,6 +360,10 @@ public async Task Run(IYahooFinanceService yahooService)
         Console.WriteLine($"Close: {record.Close:C}");
         Console.WriteLine();
     }
+
+    // Decades of history, at a coarser granularity
+    var monthly = await yahooService.GetRecordsAsync(
+        "AAPL", new DateTime(1990, 1, 1), DateTime.UtcNow, EYahooInterval.Monthly);
 }
 ```
 
