@@ -366,7 +366,23 @@ public async Task Run(IYahooFinanceService yahooService)
 
 Retrieves intraday (sub-daily) stock market data for a specified asset, at a chosen time interval. Unlike the Alpha Vantage equivalent, this requires no API key.
 
-Yahoo limits how far back intraday history reaches - roughly the last 7 days for the 1-minute interval, and around 60 days for the wider intervals. Timestamps are returned in the exchange's local time.
+Timestamps are returned in the exchange's local time.
+
+##### Limits
+
+Yahoo enforces two separate intraday limits per interval:
+
+| Interval | Data exists for the last | Max span per request |
+|----------|--------------------------|----------------------|
+| `Interval_1Min`  | 30 days  | 8 days |
+| `Interval_5Min`  | 60 days  | whole window |
+| `Interval_15Min` | 60 days  | whole window |
+| `Interval_30Min` | 60 days  | whole window |
+| `Interval_60Min` | 730 days | whole window |
+
+Requests longer than the per-request span are split automatically and the results merged, so a 20-day `Interval_1Min` range works without any handling on your side.
+
+The retention window is a hard ceiling that splitting cannot extend. If `startDate` reaches past it, the range is truncated to what Yahoo keeps and a warning is logged - a 10-year `Interval_60Min` request returns the last 730 days. If the range lies *entirely* outside the window, a `FinanceNetInvalidRequestException` is thrown instead, carrying Yahoo's own explanation. That exception is never retried, since a rejected range is a permanent answer.
 
 #### Parameters
 
