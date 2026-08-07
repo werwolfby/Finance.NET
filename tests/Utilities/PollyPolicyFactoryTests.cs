@@ -76,6 +76,34 @@ public class PollyPolicyFactoryTests
     }
 
     [Test]
+    public void GetRetryPolicy_InvalidRequest_DoesNotRetry()
+    {
+        // A 4xx rejection is a permanent answer - retrying it cannot change the outcome.
+        // Arrange
+        const int retryCount = 3;
+        var attempts = 0;
+        var policy = PollyPolicyFactory.GetRetryPolicy(retryCount, 1, _mockLogger.Object);
+
+        // Act
+        Assert.ThrowsAsync<FinanceNetInvalidRequestException>(async () => await policy.ExecuteAsync<int>(() =>
+        {
+            attempts++;
+            throw new FinanceNetInvalidRequestException("Message");
+        }));
+
+        // Assert
+        Assert.That(attempts, Is.EqualTo(1));
+        _mockLogger.Verify(
+            logger => logger.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString().Contains("Retry 1 after")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+            Times.Never);
+    }
+
+    [Test]
     public void GetRetryPolicy_ExceptionsFlowNullLogger_Throws()
     {
         // Arrange + Act
