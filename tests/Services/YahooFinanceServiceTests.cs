@@ -1049,6 +1049,95 @@ public class YahooFinanceServiceTests
         Assert.That(requests, Is.Empty);
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public void UnknownSymbol_ThrowsNoDataWithoutRetrying(bool intraday)
+    {
+        // Yahoo answers a symbol it does not know with a 404 - a permanent answer, not an outage.
+        // A multi-chunk intraday range must stop at the first request rather than ask for every chunk.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "chart_unknown_symbol.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.NotFound, File.ReadAllText(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            CreateRealPolicyRegistry(),
+            _mockYahooSession.Object);
+
+        // Act
+        var exception = Assert.ThrowsAsync<FinanceNetNoDataException>(async () =>
+        {
+            if (intraday)
+            {
+                await service.GetIntradayRecordsAsync("TESTING.NET", DateTime.UtcNow.Date.AddDays(-20), null, EInterval.Interval_1Min);
+            }
+            else
+            {
+                await service.GetRecordsAsync("TESTING.NET", DateTime.UtcNow.Date.AddDays(-20));
+            }
+        });
+
+        // Assert - Yahoo's explanation is surfaced, unwrapped, from a single request
+        Assert.That(exception.Message, Does.Contain("TESTING.NET").And.Contain("may be delisted"));
+        Assert.That(exception.InnerException, Is.Null);
+        Assert.That(requests, Has.Count.EqualTo(1));
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public void BadRequest_ThrowsInvalidRequestWithoutRetrying(bool intraday)
+    {
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "chart_bad_request.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.BadRequest, File.ReadAllText(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            CreateRealPolicyRegistry(),
+            _mockYahooSession.Object);
+
+        // Act
+        var exception = Assert.ThrowsAsync<FinanceNetInvalidRequestException>(async () =>
+        {
+            if (intraday)
+            {
+                await service.GetIntradayRecordsAsync("MSFT", DateTime.UtcNow.Date.AddDays(-5), null, EInterval.Interval_15Min);
+            }
+            else
+            {
+                await service.GetRecordsAsync("MSFT", DateTime.UtcNow.Date.AddDays(-5));
+            }
+        });
+
+        // Assert
+        Assert.That(exception.Message, Does.Contain("start date cannot be after end date"));
+        Assert.That(requests, Has.Count.EqualTo(1));
+    }
+
+    [TestCase(HttpStatusCode.TooManyRequests)]
+    [TestCase(HttpStatusCode.RequestTimeout)]
+    [TestCase(HttpStatusCode.Unauthorized)]
+    [TestCase(HttpStatusCode.InternalServerError)]
+    public void TransientRejection_IsRetried(HttpStatusCode statusCode)
+    {
+        // Rate limiting, timeouts and an expired session can clear up - only the rejections that
+        // describe the request itself are final. 401 stays retryable as a stale session looks like it.
+        // Arrange
+        var requests = SetupHttpResponseCapturingRequests(statusCode, "");
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            CreateRealPolicyRegistry(),
+            _mockYahooSession.Object);
+
+        // Act
+        var exception = Assert.ThrowsAsync<FinanceNetException>(async () => await service.GetRecordsAsync("MSFT", DateTime.UtcNow.Date.AddDays(-5)));
+
+        // Assert - the first attempt and the policy's three retries
+        Assert.That(exception.InnerException, Is.Not.Null);
+        Assert.That(requests, Has.Count.EqualTo(4));
+    }
+
     private IReadOnlyPolicyRegistry<string> CreateRealPolicyRegistry()
     {
         var registry = new Mock<IReadOnlyPolicyRegistry<string>>();

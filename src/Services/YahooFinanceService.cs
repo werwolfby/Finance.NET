@@ -172,48 +172,52 @@ public class YahooFinanceService : IYahooFinanceService
         {
             return await _retryPolicy.ExecuteAsync(async ct =>
             {
-                var jsonContent = await FetchChartJsonAsync(httpClient, url, ct).ConfigureAwait(false);
+                var jsonContent = await FetchChartJsonAsync(httpClient, symbol, url, ct).ConfigureAwait(false);
                 var parsedData = JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent) ?? throw new FinanceNetException("Invalid data returned by Yahoo");
-                var chart = parsedData.Chart ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
-
-                if (chart.Error != null)
+                if (parsedData.Chart?.Error != null)
                 {
-                    throw new FinanceNetException($"Received an error response from Yahoo: {chart.Error}");
+                    throw new FinanceNetException($"Received an error response from Yahoo: {parsedData.Chart.Error}");
                 }
-                var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no intraday records for {symbol}");
 
-                // filter against this chunk, so the trailing bar Yahoo appends cannot be added once per chunk
-                return ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1));
+                // a quiet chunk is not fatal - a neighbouring one may still carry records
+                var chartResult = parsedData.Chart?.Result?.FirstOrDefault();
+                return chartResult == null
+                    ? []
+                    // filter against this chunk, so the trailing bar Yahoo appends cannot be added once per chunk
+                    : ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1));
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             throw;
         }
-        catch (FinanceNetNoDataException)
-        {
-            // a quiet chunk is not fatal - a neighbouring one may still carry records
-            return [];
-        }
-        catch (Exception ex) when (ex is not FinanceNetInvalidRequestException)
+        catch (Exception ex) when (ex is not (FinanceNetNoDataException or FinanceNetInvalidRequestException))
         {
             throw new FinanceNetException($"No intraday records found for {symbol}", ex);
         }
     }
 
     /// <summary>
-    /// Fetches the chart payload, turning the provider's rejection of a request into a
-    /// <see cref="FinanceNetInvalidRequestException"/> so the retry policy leaves it alone.
+    /// Fetches the chart payload. A rejection that is Yahoo's final answer about this request
+    /// becomes an exception the retry policy leaves alone, carrying Yahoo's own explanation.
     /// </summary>
-    private async Task<string> FetchChartJsonAsync(HttpClient httpClient, string url, CancellationToken token)
+    /// <remarks>
+    /// Only the statuses Yahoo uses to describe the request itself are final: 404 for a symbol
+    /// it does not know, 400 for invalid input, 422 for a range outside what it keeps. Anything
+    /// else - rate limiting, timeouts, an expired session, a server error - can clear up and
+    /// stays retryable.
+    /// </remarks>
+    private async Task<string> FetchChartJsonAsync(HttpClient httpClient, string symbol, string url, CancellationToken token)
     {
         var response = await httpClient.GetAsync(url, token).ConfigureAwait(false);
         var jsonContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-        if (response.StatusCode == HttpStatusCode.UnprocessableEntity)
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity)
         {
-            var description = TryReadChartErrorDescription(jsonContent);
-            throw new FinanceNetInvalidRequestException($"Yahoo rejected the request: {description ?? jsonContent}");
+            var description = TryReadChartErrorDescription(jsonContent) ?? jsonContent;
+            throw response.StatusCode == HttpStatusCode.NotFound
+                ? new FinanceNetNoDataException($"Yahoo has no data for {symbol}: {description}")
+                : new FinanceNetInvalidRequestException($"Yahoo rejected the request for {symbol}: {description}");
         }
         response.EnsureSuccessStatusCode();
 
@@ -439,7 +443,7 @@ public class YahooFinanceService : IYahooFinanceService
         {
             return await _retryPolicy.ExecuteAsync(async ct =>
             {
-                var jsonContent = await FetchChartJsonAsync(httpClient, url, ct).ConfigureAwait(false);
+                var jsonContent = await FetchChartJsonAsync(httpClient, symbol, url, ct).ConfigureAwait(false);
                 var parsedData = JsonConvert.DeserializeObject<ChartResponseRoot>(jsonContent) ?? throw new FinanceNetException("Invalid data returned by Yahoo");
                 var chart = parsedData.Chart ?? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}");
 

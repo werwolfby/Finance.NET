@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
@@ -161,7 +162,11 @@ public class YahooFinanceTests
         }
         else
         {
-            Assert.ThrowsAsync<FinanceNetException>(async () => await _service.GetRecordsAsync(symbol, startDate));
+            // Yahoo's 404 for an unknown symbol is final - answered at once, not after the retry budget
+            var elapsed = Stopwatch.StartNew();
+            var exception = Assert.ThrowsAsync<FinanceNetNoDataException>(async () => await _service.GetRecordsAsync(symbol, startDate));
+            Assert.That(exception.Message, Does.Contain(symbol));
+            Assert.That(elapsed.Elapsed, Is.LessThan(TimeSpan.FromSeconds(30)));
         }
     }
 
@@ -243,7 +248,11 @@ public class YahooFinanceTests
     {
         var startDate = DateTime.UtcNow.AddDays(-5).Date;
 
-        Assert.ThrowsAsync<FinanceNetException>(async () => await _service.GetIntradayRecordsAsync("TESTING.NET", startDate));
+        // Yahoo's 404 for an unknown symbol is final - answered at once, not after the retry budget
+        var elapsed = Stopwatch.StartNew();
+        var exception = Assert.ThrowsAsync<FinanceNetNoDataException>(async () => await _service.GetIntradayRecordsAsync("TESTING.NET", startDate));
+        Assert.That(exception.Message, Does.Contain("TESTING.NET"));
+        Assert.That(elapsed.Elapsed, Is.LessThan(TimeSpan.FromSeconds(30)));
     }
 
     [Test]

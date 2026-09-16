@@ -393,6 +393,8 @@ Requests longer than the per-request span are split automatically and the result
 
 The retention window is a hard ceiling that splitting cannot extend. If `startDate` reaches past it, the range is truncated to what Yahoo keeps and a warning is logged - a 10-year `Interval_60Min` request returns the last 730 days. If the range lies *entirely* outside the window, a `FinanceNetInvalidRequestException` is thrown instead, carrying Yahoo's own explanation. That exception is never retried, since a rejected range is a permanent answer.
 
+The same goes for Yahoo's other final answers, here and in `GetRecordsAsync`: a symbol Yahoo does not know throws `FinanceNetNoDataException` ("symbol may be delisted"), and invalid input throws `FinanceNetInvalidRequestException`. Neither is retried. Rate limiting, timeouts and server errors still are.
+
 #### Parameters
 
 * `string symbol`: The symbol of the quote (e.g., `"AAPL"` for Apple).
