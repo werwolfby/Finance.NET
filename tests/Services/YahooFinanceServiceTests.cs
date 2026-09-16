@@ -570,6 +570,59 @@ public class YahooFinanceServiceTests
         Assert.That(requests[0], Does.Contain($"interval={expected}"));
     }
 
+    [TestCase(EYahooInterval.Weekly, "2024-05-15", "2024-05-17", new[] { "2024-05-13" }, false)]
+    [TestCase(EYahooInterval.Weekly, "2024-05-15", "2024-05-17", new[] { "2024-05-13" }, true)]
+    [TestCase(EYahooInterval.Monthly, "2024-05-15", "2024-06-20", new[] { "2024-06-01", "2024-05-01" }, false)]
+    [TestCase(EYahooInterval.Monthly, "2024-05-15", "2024-06-20", new[] { "2024-06-01", "2024-05-01" }, true)]
+    public async Task GetRecordsAsync_StartMidPeriod_ReturnsThePeriodContainingIt(EYahooInterval interval, string start, string end, string[] expected, bool yahooServesWholePeriods)
+    {
+        // Yahoo dates a weekly or monthly record at the start of its period (Monday, the 1st), so
+        // the record covering startDate is dated before it - it must still be returned.
+        // Arrange
+        var periodStarts = interval == EYahooInterval.Weekly
+            ? Enumerable.Range(0, 53).Select(week => new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddDays(7 * week)).ToList()
+            : Enumerable.Range(1, 12).Select(month => new DateTime(2024, month, 1, 0, 0, 0, DateTimeKind.Utc)).ToList();
+        var periods = periodStarts.Select(periodStart => (periodStart, interval == EYahooInterval.Weekly ? periodStart.AddDays(7) : periodStart.AddMonths(1)));
+        SetupChartEndpoint(-4 * 3600, periods, yahooServesWholePeriods);
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetRecordsAsync(
+            "MSFT",
+            DateTime.Parse(start, CultureInfo.InvariantCulture),
+            DateTime.Parse(end, CultureInfo.InvariantCulture),
+            interval);
+
+        // Assert
+        Assert.That(result.Select(e => e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_ExchangeAheadOfUtc_ReturnsTheFirstDay()
+    {
+        // A local day in New Zealand starts at noon UTC the day before, so a record stamped at the
+        // start of that day lies before a period1 cut at UTC midnight.
+        // Arrange
+        var firstDay = new DateTime(2024, 5, 13, 0, 0, 0, DateTimeKind.Utc);
+        var days = Enumerable.Range(-3, 10).Select(offset => firstDay.AddDays(offset)).Select(day => (day, day.AddDays(1)));
+        SetupChartEndpoint(12 * 3600, days);
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetRecordsAsync("AIR.NZ", firstDay, firstDay.AddDays(2), EYahooInterval.Daily);
+
+        // Assert - exactly the three requested days, newest first
+        Assert.That(result.Select(e => e.Date), Is.EqualTo(new[] { firstDay.AddDays(2), firstDay.AddDays(1), firstDay }));
+    }
+
     [Test]
     public async Task GetRecordsAsync_DeepHistory_IsNotTruncated()
     {
@@ -591,8 +644,9 @@ public class YahooFinanceServiceTests
 
         // Assert
         Assert.That(requests, Has.Count.EqualTo(1));
-        var requestedPeriod1 = long.Parse(Regex.Match(requests[0], @"period1=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
-        Assert.That(requestedPeriod1, Is.EqualTo(Helper.ToUnixTime(startDate)));
+        // unclamped: it starts at startDate, less at most a day of time-zone padding
+        var requestedPeriod1 = ReadQueryNumber(requests[0], "period1");
+        Assert.That(requestedPeriod1, Is.InRange(Helper.ToUnixTime(startDate.AddDays(-1)).Value, Helper.ToUnixTime(startDate).Value));
     }
 
     [Test]
@@ -883,6 +937,55 @@ public class YahooFinanceServiceTests
         Assert.That(requests, Is.All.Contain("interval=1m"));
     }
 
+    [TestCase(12, 10, 17, EInterval.Interval_1Min)]   // NZX: the session opens before UTC midnight
+    [TestCase(-4, 0, 24, EInterval.Interval_1Min)]    // futures in New York: the evening runs past UTC midnight
+    [TestCase(12, 10, 17, EInterval.Interval_15Min)]  // one request, so only the range edges are at stake
+    [TestCase(-4, 0, 24, EInterval.Interval_15Min)]
+    public async Task GetIntradayRecordsAsync_LocalDayCrossesUtcMidnight_ReturnsEveryBarInRange(int gmtOffsetHours, int openHour, int closeHour, EInterval interval)
+    {
+        // Records are grouped by the exchange's local date, which does not start at UTC midnight.
+        // No bar of a requested local day may be lost - at the range edges or between chunks.
+        // Arrange
+        var firstDay = DateTime.UtcNow.Date.AddDays(-12);
+        var lastDay = firstDay.AddDays(9);
+        var bars = Enumerable.Range(-2, 14)
+            .SelectMany(day => Enumerable.Range(openHour, closeHour - openHour).Select(hour => firstDay.AddDays(day).AddHours(hour)))
+            .ToList();
+        SetupChartEndpoint(gmtOffsetHours * 3600, bars.Select(bar => (bar, bar.AddMinutes(1))));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetIntradayRecordsAsync("X", firstDay, lastDay, interval);
+
+        // Assert
+        Assert.That(result.Select(e => e.DateTime), Is.EquivalentTo(bars.Where(bar => bar.Date >= firstDay && bar.Date <= lastDay)));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_OneMinuteChunks_StayWithinYahoosPerRequestSpan()
+    {
+        // Yahoo rejects a 1m request spanning more than 8 days, whatever the request is padded by.
+        // Arrange
+        var firstDay = DateTime.UtcNow.Date.AddDays(-25);
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildIntradayChartJson(firstDay, 26));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        await service.GetIntradayRecordsAsync("MSFT", firstDay, DateTime.UtcNow.Date, EInterval.Interval_1Min);
+
+        // Assert
+        var spans = requests.Select(url => TimeSpan.FromSeconds(ReadQueryNumber(url, "period2") - ReadQueryNumber(url, "period1")));
+        Assert.That(spans, Is.All.LessThan(TimeSpan.FromDays(8)));
+    }
+
     [Test]
     public async Task GetIntradayRecordsAsync_StartBeyondRetention_ClampsToWhatYahooKeeps()
     {
@@ -904,8 +1007,9 @@ public class YahooFinanceServiceTests
             DateTime.UtcNow.Date,
             EInterval.Interval_60Min);
 
-        // Assert - the earliest period1 asked for is the retention boundary, not 10 years back
-        var earliestAllowed = Helper.ToUnixTime(DateTime.UtcNow.Date.AddDays(-730));
+        // Assert - the earliest period1 asked for is the retention boundary, not 10 years back,
+        // and no padding reaches past it: the service stays a day inside Yahoo's 730
+        var earliestAllowed = Helper.ToUnixTime(DateTime.UtcNow.Date.AddDays(-729));
         var requestedPeriod1 = requests
             .Select(url => long.Parse(Regex.Match(url, @"period1=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture))
             .Min();
@@ -1005,14 +1109,18 @@ public class YahooFinanceServiceTests
     private static string BuildIntradayChartJson(DateTime firstBarDate, int days)
     {
         var timestamps = Enumerable.Range(0, days)
-            .Select(day => Helper.ToUnixTime(firstBarDate.Date.AddDays(day).AddHours(14)).Value)
-            .Select(unixTime => unixTime.ToString(CultureInfo.InvariantCulture))
-            .ToList();
-        var prices = string.Join(",", timestamps.Select(_ => "1.0"));
-        var volumes = string.Join(",", timestamps.Select(_ => "100"));
+            .Select(day => Helper.ToUnixTime(firstBarDate.Date.AddDays(day).AddHours(14)).Value);
+        return BuildChartJson(timestamps, 0);
+    }
+
+    private static string BuildChartJson(IEnumerable<long> timestamps, int gmtOffsetSeconds)
+    {
+        var stamps = timestamps.Select(unixTime => unixTime.ToString(CultureInfo.InvariantCulture)).ToList();
+        var prices = string.Join(",", stamps.Select(_ => "1.0"));
+        var volumes = string.Join(",", stamps.Select(_ => "100"));
         return "{\"chart\":{\"result\":[{"
-            + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":0},"
-            + "\"timestamp\":[" + string.Join(",", timestamps) + "],"
+            + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":" + gmtOffsetSeconds.ToString(CultureInfo.InvariantCulture) + "},"
+            + "\"timestamp\":[" + string.Join(",", stamps) + "],"
             + "\"indicators\":{\"quote\":[{"
             + "\"open\":[" + prices + "],"
             + "\"high\":[" + prices + "],"
@@ -1021,6 +1129,47 @@ public class YahooFinanceServiceTests
             + "\"volume\":[" + volumes + "]}]}}],"
             + "\"error\":null}}";
     }
+
+    /// <summary>
+    /// Stands in for the chart endpoint: each request is answered with the bars Yahoo would
+    /// serve for its period1/period2, out of a fixed set given in exchange-local time.
+    /// </summary>
+    /// <param name="gmtOffsetSeconds">The exchange's offset from UTC.</param>
+    /// <param name="localBars">Each bar's period, in exchange-local time.</param>
+    /// <param name="servesWholePeriods">
+    /// Yahoo is not consistent here. Intraday and monthly bars come back only when their stamp lies in
+    /// [period1, period2); a weekly bar comes back whenever its week overlaps that range, even when it
+    /// is stamped before period1.
+    /// </param>
+    private void SetupChartEndpoint(int gmtOffsetSeconds, IEnumerable<(DateTime Start, DateTime End)> localBars, bool servesWholePeriods = false)
+    {
+        var bars = localBars
+            .Select(bar => (Start: Helper.ToUnixTime(bar.Start).Value - gmtOffsetSeconds, End: Helper.ToUnixTime(bar.End).Value - gmtOffsetSeconds))
+            .OrderBy(bar => bar.Start)
+            .ToList();
+        _mockHandler
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage request, CancellationToken _) =>
+            {
+                var url = request.RequestUri.ToString();
+                var period1 = ReadQueryNumber(url, "period1");
+                var period2 = ReadQueryNumber(url, "period2");
+                var served = bars
+                    .Where(bar => servesWholePeriods
+                        ? bar.Start < period2 && bar.End > period1
+                        : bar.Start >= period1 && bar.Start < period2)
+                    .Select(bar => bar.Start);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(BuildChartJson(served, gmtOffsetSeconds), Encoding.UTF8, "application/json"),
+                };
+            });
+        _mockHttpClientFactory.Setup(e => e.CreateClient(It.IsAny<string>())).Returns(new HttpClient(_mockHandler.Object));
+    }
+
+    private static long ReadQueryNumber(string url, string name)
+        => long.Parse(Regex.Match(url, $@"[?&]{name}=(-?\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
 
     private List<string> SetupHttpResponseCapturingRequests(HttpStatusCode statusCode, string content)
     {

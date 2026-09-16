@@ -142,7 +142,7 @@ public class YahooFinanceService : IYahooFinanceService
             {
                 chunkEndExclusive = endExclusive;
             }
-            var chunk = await GetIntradayRecordsChunkAsync(symbol, chunkStart, chunkEndExclusive, interval, token).ConfigureAwait(false);
+            var chunk = await GetIntradayRecordsChunkAsync(symbol, chunkStart, chunkEndExclusive, earliestAvailable, interval, token).ConfigureAwait(false);
             records.AddRange(chunk);
         }
 
@@ -153,13 +153,21 @@ public class YahooFinanceService : IYahooFinanceService
             : records;
     }
 
-    private async Task<List<IntradayRecord>> GetIntradayRecordsChunkAsync(string symbol, DateTime startDate, DateTime endExclusive, EInterval interval, CancellationToken token)
+    private async Task<List<IntradayRecord>> GetIntradayRecordsChunkAsync(string symbol, DateTime startDate, DateTime endExclusive, DateTime earliestAvailable, EInterval interval, CancellationToken token)
     {
         var httpClient = _httpClientFactory.CreateClient(Constants.YahooHttpClientName);
+        // The padding must not reach past the retention boundary, or Yahoo rejects the whole
+        // request. Bars stamped before that boundary are ones this service already treats as
+        // too close to Yahoo's cut-off to ask for.
+        var requestStart = startDate - RequestPadding;
+        if (requestStart < earliestAvailable)
+        {
+            requestStart = earliestAvailable;
+        }
         var url = $"{Constants.YahooChartApiUrl}/{symbol}" +
             $"?interval={ToYahooInterval(interval)}" +
-            $"&period1={Helper.ToUnixTime(startDate)}" +
-            $"&period2={Helper.ToUnixTime(endExclusive)}";
+            $"&period1={Helper.ToUnixTime(requestStart)}" +
+            $"&period2={Helper.ToUnixTime(endExclusive + RequestPadding)}";
         try
         {
             return await _retryPolicy.ExecuteAsync(async ct =>
@@ -226,6 +234,19 @@ public class YahooFinanceService : IYahooFinanceService
     }
 
     /// <summary>
+    /// How far every chart request reaches past the dates it is for, on both sides.
+    /// </summary>
+    /// <remarks>
+    /// Request bounds are UTC instants, but records belong to the exchange's local date, and a
+    /// local day starts up to 14 hours before UTC midnight (UTC+14) and ends up to 12 hours after
+    /// it (UTC-12). Bounds cut at UTC midnight therefore miss one edge of the day - the opening
+    /// bars in New Zealand, the evening session of a New York future. Padding the request and
+    /// then filtering on the local date keeps every day whole. The filter also gives each bar to
+    /// exactly one local date, so the overlap between adjacent padded chunks never duplicates one.
+    /// </remarks>
+    private static readonly TimeSpan RequestPadding = TimeSpan.FromHours(14);
+
+    /// <summary>
     /// How much intraday history Yahoo keeps per interval, and how much of it one request may span.
     /// </summary>
     /// <remarks>
@@ -235,8 +256,9 @@ public class YahooFinanceService : IYahooFinanceService
     /// </remarks>
     private static (int MaxSpanDays, int RetentionDays) GetChartLimits(EInterval interval) => interval switch
     {
-        // 8 days are allowed per request; stay a day inside that to keep boundaries safe
-        EInterval.Interval_1Min => (7, 30),
+        // 8 days are allowed per request, padding included: 6 days plus RequestPadding on both
+        // sides comes to a little over 7
+        EInterval.Interval_1Min => (6, 30),
         EInterval.Interval_5Min => (60, 60),
         EInterval.Interval_15Min => (60, 60),
         EInterval.Interval_30Min => (60, 60),
@@ -399,9 +421,12 @@ public class YahooFinanceService : IYahooFinanceService
         startDate ??= DateTime.UtcNow.AddDays(-7).Date;
         endDate ??= DateTime.UtcNow.Date;
 
-        // period2 is exclusive, so ask for the day after the requested end date
-        var period1 = Helper.ToUnixTime(startDate.Value.Date);
-        var period2 = Helper.ToUnixTime(endDate.Value.Date.AddDays(1));
+        // Yahoo does not reliably return the period that contains period1, so ask from the start
+        // of that period - Monday for weeks, the 1st for months. period2 is exclusive, so ask for
+        // the day after the requested end date. Both are padded, see RequestPadding.
+        var firstPeriodStart = GetPeriodStart(startDate.Value.Date, interval);
+        var period1 = Helper.ToUnixTime(firstPeriodStart.Ticks > RequestPadding.Ticks ? firstPeriodStart - RequestPadding : DateTime.MinValue);
+        var period2 = Helper.ToUnixTime(endDate.Value.Date.AddDays(1) + RequestPadding);
 
         // daily and coarser data is not subject to an intraday retention window, so the range
         // goes out unclamped and in one request - it reaches the first trading day
@@ -424,7 +449,7 @@ public class YahooFinanceService : IYahooFinanceService
                 }
                 var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}");
 
-                var records = ParseRecords(chartResult, startDate.Value.Date, endDate.Value.Date);
+                var records = ParseRecords(chartResult, startDate.Value.Date, endDate.Value.Date, interval);
                 return records.IsNullOrEmpty() ? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}") : records;
             }, token).ConfigureAwait(false);
         }
@@ -442,7 +467,7 @@ public class YahooFinanceService : IYahooFinanceService
     /// Projects the column-oriented chart payload into records, attaching any corporate action
     /// that fell on the same date.
     /// </summary>
-    private static List<Record> ParseRecords(ChartResult chartResult, DateTime startDate, DateTime endDate)
+    private static List<Record> ParseRecords(ChartResult chartResult, DateTime startDate, DateTime endDate, EYahooInterval interval)
     {
         var records = new List<Record>();
         var timestamps = chartResult.Timestamp;
@@ -465,7 +490,9 @@ public class YahooFinanceService : IYahooFinanceService
                 continue;
             }
             var date = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
-            if (date < startDate || date > endDate)
+            // a record is dated at the start of its period, so keep every period that overlaps
+            // the range - including the one that began before startDate
+            if (date > endDate || GetPeriodEnd(date, interval) <= startDate)
             {
                 continue;
             }
@@ -488,6 +515,29 @@ public class YahooFinanceService : IYahooFinanceService
         records.Reverse();
         return records;
     }
+
+    /// <summary>
+    /// The date Yahoo stamps the record covering <paramref name="date"/> with.
+    /// </summary>
+    private static DateTime GetPeriodStart(DateTime date, EYahooInterval interval) => interval switch
+    {
+        EYahooInterval.Daily => date,
+        // weeks run Monday to Sunday
+        EYahooInterval.Weekly => date.AddDays(-(((int)date.DayOfWeek + 6) % 7)),
+        EYahooInterval.Monthly => new DateTime(date.Year, date.Month, 1, 0, 0, 0, date.Kind),
+        _ => throw new FinanceNetException($"Unsupported interval {interval}"),
+    };
+
+    /// <summary>
+    /// The first date after the period a record dated <paramref name="periodStart"/> covers.
+    /// </summary>
+    private static DateTime GetPeriodEnd(DateTime periodStart, EYahooInterval interval) => interval switch
+    {
+        EYahooInterval.Daily => periodStart.AddDays(1),
+        EYahooInterval.Weekly => periodStart.AddDays(7),
+        EYahooInterval.Monthly => periodStart.AddMonths(1),
+        _ => throw new FinanceNetException($"Unsupported interval {interval}"),
+    };
 
     private static Dictionary<DateTime, TEvent> IndexEventsByDate<TEvent>(Dictionary<string, TEvent>? events, Func<TEvent, long> getDate, TimeSpan offset)
     {
