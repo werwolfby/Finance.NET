@@ -548,6 +548,62 @@ public class YahooFinanceServiceTests
         Assert.That(requests[0], Does.Contain("interval=1d"));
     }
 
+    [Test]
+    public async Task GetRecordsAsync_Weekly_AttachesCorporateActionsToTheirWeek()
+    {
+        // A weekly record is stamped with its Monday, but each action carries the day it happened.
+        // Every action in the week belongs to that record - dividends add up, splits compound.
+        // Arrange
+        var weeks = new[] { NewYorkToUnix(2024, 5, 6), NewYorkToUnix(2024, 5, 13), NewYorkToUnix(2024, 5, 20) };
+        var events = BuildEventsJson(
+            [(NewYorkToUnix(2024, 5, 13, 9, 30), 0.75), (NewYorkToUnix(2024, 5, 16, 9, 30), 1.0)],
+            [(NewYorkToUnix(2024, 5, 15, 9, 30), 2, 1), (NewYorkToUnix(2024, 5, 24, 9, 30), 3, 1)]);
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(weeks, NewYorkSummerOffset, events));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetRecordsAsync(
+            "MSFT",
+            new DateTime(2024, 5, 6, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2024, 5, 26, 0, 0, 0, DateTimeKind.Utc),
+            EYahooInterval.Weekly)).ToList();
+
+        // Assert - newest first
+        Assert.That(result.Select(e => e.Dividend), Is.EqualTo(new decimal?[] { null, 1.75m, null }));
+        Assert.That(result.Select(e => e.SplitCoefficient), Is.EqualTo(new decimal?[] { 3m, 2m, null }));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_Monthly_AttachesCorporateActionsToTheirMonth()
+    {
+        // Arrange
+        var months = new[] { NewYorkToUnix(2024, 4, 1), NewYorkToUnix(2024, 5, 1), NewYorkToUnix(2024, 6, 1) };
+        var events = BuildEventsJson(
+            [(NewYorkToUnix(2024, 5, 15, 9, 30), 0.75)],
+            [(NewYorkToUnix(2024, 6, 3, 9, 30), 2, 1), (NewYorkToUnix(2024, 6, 20, 9, 30), 3, 1)]);
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(months, NewYorkSummerOffset, events));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetRecordsAsync(
+            "MSFT",
+            new DateTime(2024, 4, 1, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2024, 6, 30, 0, 0, 0, DateTimeKind.Utc),
+            EYahooInterval.Monthly)).ToList();
+
+        // Assert - newest first
+        Assert.That(result.Select(e => e.Dividend), Is.EqualTo(new decimal?[] { null, 0.75m, null }));
+        Assert.That(result.Select(e => e.SplitCoefficient), Is.EqualTo(new decimal?[] { 6m, null, null }));
+    }
+
     [TestCase(EYahooInterval.Daily, "1d")]
     [TestCase(EYahooInterval.Weekly, "1wk")]
     [TestCase(EYahooInterval.Monthly, "1mo")]
@@ -1202,7 +1258,7 @@ public class YahooFinanceServiceTests
         return BuildChartJson(timestamps, 0);
     }
 
-    private static string BuildChartJson(IEnumerable<long> timestamps, int gmtOffsetSeconds)
+    private static string BuildChartJson(IEnumerable<long> timestamps, int gmtOffsetSeconds, string events = null)
     {
         var stamps = timestamps.Select(unixTime => unixTime.ToString(CultureInfo.InvariantCulture)).ToList();
         var prices = string.Join(",", stamps.Select(_ => "1.0"));
@@ -1210,6 +1266,7 @@ public class YahooFinanceServiceTests
         return "{\"chart\":{\"result\":[{"
             + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":" + gmtOffsetSeconds.ToString(CultureInfo.InvariantCulture) + "},"
             + "\"timestamp\":[" + string.Join(",", stamps) + "],"
+            + (events == null ? "" : "\"events\":" + events + ",")
             + "\"indicators\":{\"quote\":[{"
             + "\"open\":[" + prices + "],"
             + "\"high\":[" + prices + "],"
@@ -1217,6 +1274,24 @@ public class YahooFinanceServiceTests
             + "\"close\":[" + prices + "],"
             + "\"volume\":[" + volumes + "]}]}}],"
             + "\"error\":null}}";
+    }
+
+    private const int NewYorkSummerOffset = -4 * 3600;
+
+    private static long NewYorkToUnix(int year, int month, int day, int hour = 0, int minute = 0)
+        => Helper.ToUnixTime(new DateTime(year, month, day, hour, minute, 0, DateTimeKind.Utc)).Value - NewYorkSummerOffset;
+
+    /// <summary>
+    /// A chart events block as Yahoo sends it: each action carries the moment it happened (the open,
+    /// 09:30 local) as its date. The keys are never read, so each action is keyed by its own date.
+    /// </summary>
+    private static string BuildEventsJson(IEnumerable<(long Date, double Amount)> dividends, IEnumerable<(long Date, int Numerator, int Denominator)> splits)
+    {
+        var dividendEntries = dividends.Select(d =>
+            $"\"{d.Date}\":{{\"amount\":{d.Amount.ToString(CultureInfo.InvariantCulture)},\"date\":{d.Date}}}");
+        var splitEntries = splits.Select(e =>
+            $"\"{e.Date}\":{{\"date\":{e.Date},\"numerator\":{e.Numerator},\"denominator\":{e.Denominator},\"splitRatio\":\"{e.Numerator}:{e.Denominator}\"}}");
+        return "{\"dividends\":{" + string.Join(",", dividendEntries) + "},\"splits\":{" + string.Join(",", splitEntries) + "}}";
     }
 
     /// <summary>

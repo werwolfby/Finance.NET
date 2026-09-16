@@ -339,8 +339,8 @@ A task that resolves to an `IEnumerable<Record>`, where each `Record` represents
 | `Close`            | `decimal?`  | The closing price at the end of the trading session.                            | 152.75            |
 | `AdjustedClose`    | `decimal?`  | The adjusted closing price, accounting for stock splits and dividends.          | 153.00            |
 | `Volume`           | `long?`     | The trading volume (number of shares traded).                                   | 10,000,000        |
-| `Dividend`         | `decimal?`  | The cash dividend that went ex on this date, or `null` if none did.             | 0.24              |
-| `SplitCoefficient` | `decimal?`  | The ratio of a split effective on this date (10 for a 10:1), or `null`.         | 10                |
+| `Dividend`         | `decimal?`  | The cash dividend that went ex on this date, or `null` if none did. Weekly and monthly records total the period's dividends. | 0.24              |
+| `SplitCoefficient` | `decimal?`  | The ratio of a split effective on this date (10 for a 10:1), or `null`. Weekly and monthly records combine the period's splits (6 for a 2:1 and a 3:1). | 10                |
 
 #### Example
 

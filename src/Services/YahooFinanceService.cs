@@ -482,8 +482,8 @@ public class YahooFinanceService : IYahooFinanceService
         }
         var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
         var adjClose = chartResult.Indicators?.AdjClose?.FirstOrDefault()?.AdjClose;
-        var dividends = IndexEventsByDate(chartResult.Events?.Dividends, e => e.Date, offset);
-        var splits = IndexEventsByDate(chartResult.Events?.Splits, e => e.Date, offset);
+        var dividends = TotalEventsByPeriod(chartResult.Events?.Dividends, e => e.Date, e => ToDecimal(e.Amount), (a, b) => a + b, offset, interval);
+        var splits = TotalEventsByPeriod(chartResult.Events?.Splits, e => e.Date, ToSplitCoefficient, (a, b) => a * b, offset, interval);
 
         for (var i = 0; i < timestamps.Count; i++)
         {
@@ -509,8 +509,10 @@ public class YahooFinanceService : IYahooFinanceService
                 Close = ToDecimal(close),
                 AdjustedClose = ToDecimal(ElementAtOrNull(adjClose, i)) ?? ToDecimal(close),
                 Volume = ElementAtOrNull(quote.Volume, i),
-                Dividend = dividends.TryGetValue(date, out var dividend) ? ToDecimal(dividend.Amount) : null,
-                SplitCoefficient = splits.TryGetValue(date, out var split) ? ToSplitCoefficient(split) : null,
+                // looked up by the record's own date: the current period's live record is stamped
+                // with today, and must not repeat what the period's record already carries
+                Dividend = dividends.TryGetValue(date, out var dividend) ? dividend : null,
+                SplitCoefficient = splits.TryGetValue(date, out var split) ? split : null,
             });
         }
 
@@ -543,19 +545,35 @@ public class YahooFinanceService : IYahooFinanceService
         _ => throw new FinanceNetException($"Unsupported interval {interval}"),
     };
 
-    private static Dictionary<DateTime, TEvent> IndexEventsByDate<TEvent>(Dictionary<string, TEvent>? events, Func<TEvent, long> getDate, TimeSpan offset)
+    /// <summary>
+    /// Combines the corporate actions of each period, keyed by the date its record is stamped with.
+    /// </summary>
+    /// <remarks>
+    /// Yahoo stamps a weekly or monthly record with the start of its period but reports each action
+    /// on the day it happened, so an action is filed under the start of the period that day falls in.
+    /// Several actions in one period are combined - dividends add up, split ratios multiply.
+    /// </remarks>
+    private static Dictionary<DateTime, decimal> TotalEventsByPeriod<TEvent>(
+        Dictionary<string, TEvent>? events,
+        Func<TEvent, long> getDate,
+        Func<TEvent, decimal?> getValue,
+        Func<decimal, decimal, decimal> combine,
+        TimeSpan offset,
+        EYahooInterval interval)
     {
-        var indexed = new Dictionary<DateTime, TEvent>();
-        if (events == null)
+        var totals = new Dictionary<DateTime, decimal>();
+        foreach (var item in events?.Values ?? Enumerable.Empty<TEvent>())
         {
-            return indexed;
-        }
-        foreach (var item in events.Values)
-        {
+            var value = getValue(item);
+            if (value == null)
+            {
+                continue;
+            }
             var date = (Helper.UnixToDateTime(getDate(item)) ?? DateTime.UnixEpoch).Add(offset).Date;
-            indexed[date] = item;
+            var period = GetPeriodStart(date, interval);
+            totals[period] = totals.TryGetValue(period, out var total) ? combine(total, value.Value) : value.Value;
         }
-        return indexed;
+        return totals;
     }
 
     private static decimal? ToSplitCoefficient(ChartSplit split)

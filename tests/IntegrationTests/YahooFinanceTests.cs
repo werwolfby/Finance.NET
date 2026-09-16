@@ -94,6 +94,34 @@ public class YahooFinanceTests
         Assert.That(records.Any(e => e.Dividend > 0), Is.True);
     }
 
+    [Test]
+    public async Task GetRecordsAsync_Weekly_CarriesTheWeeksDividend()
+    {
+        // MSFT went ex-dividend on Wednesday 2024-05-15 - the week is stamped Monday 2024-05-13.
+        var records = (await _service.GetRecordsAsync(
+            "MSFT",
+            new DateTime(2024, 5, 6, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2024, 5, 26, 0, 0, 0, DateTimeKind.Utc),
+            EYahooInterval.Weekly)).ToList();
+
+        Assert.That(records.Single(e => e.Date == new DateTime(2024, 5, 13, 0, 0, 0, DateTimeKind.Utc)).Dividend, Is.EqualTo(0.75m));
+        Assert.That(records.Count(e => e.Dividend != null), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_Monthly_CarriesTheMonthsSplit()
+    {
+        // TSLA split 3:1 on Thursday 2022-08-25 - the month is stamped 2022-08-01.
+        var records = (await _service.GetRecordsAsync(
+            "TSLA",
+            new DateTime(2022, 7, 1, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2022, 9, 30, 0, 0, 0, DateTimeKind.Utc),
+            EYahooInterval.Monthly)).ToList();
+
+        Assert.That(records.Single(e => e.Date == new DateTime(2022, 8, 1, 0, 0, 0, DateTimeKind.Utc)).SplitCoefficient, Is.EqualTo(3m));
+        Assert.That(records.Count(e => e.SplitCoefficient != null), Is.EqualTo(1));
+    }
+
     [TestCase(EYahooInterval.Weekly, "2024-05-15", "2024-05-17", "2024-05-13")]
     [TestCase(EYahooInterval.Monthly, "2024-05-15", "2024-06-20", "2024-06-01,2024-05-01")]
     public async Task GetRecordsAsync_StartMidPeriod_ReturnsThePeriodContainingIt(EYahooInterval interval, string start, string end, string expected)
