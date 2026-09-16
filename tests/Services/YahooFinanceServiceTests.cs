@@ -548,6 +548,41 @@ public class YahooFinanceServiceTests
         Assert.That(requests[0], Does.Contain("interval=1d"));
     }
 
+    [TestCase(EYahooInterval.Weekly, "records_weekly_current_period.json", "2026-09-14", 497.06, 509.95, 491.13, 493.6, 47767210L, "2026-09-07")]
+    [TestCase(EYahooInterval.Monthly, "records_monthly_current_period.json", "2026-09-01", 497.52, 515.65, 486.0, 493.65, 188699448L, "2026-08-01")]
+    public async Task GetRecordsAsync_CurrentPeriod_MergesYahoosTwoBarsIntoOneRecord(
+        EYahooInterval interval, string fixture, string current, double open, double high, double low, double close, long volume, string previous)
+    {
+        // Yahoo sends the unfinished period as two bars: one up to yesterday, stamped with the
+        // period's start, and one for today alone, stamped with the time of the last trade.
+        // Together they are the period so far - one record, not two.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", fixture);
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetRecordsAsync(
+            "MSFT",
+            new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Utc),
+            interval)).ToList();
+
+        // Assert - the period's open, the widest range, today's close, both volumes
+        Assert.That(result.Select(e => e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), Is.EqualTo(new[] { current, previous }));
+        var merged = result[0];
+        Assert.That(merged.Open, Is.EqualTo((decimal)open));
+        Assert.That(merged.High, Is.EqualTo((decimal)high));
+        Assert.That(merged.Low, Is.EqualTo((decimal)low));
+        Assert.That(merged.Close, Is.EqualTo((decimal)close));
+        Assert.That(merged.AdjustedClose, Is.EqualTo((decimal)close));
+        Assert.That(merged.Volume, Is.EqualTo(volume));
+    }
+
     [Test]
     public async Task GetRecordsAsync_Weekly_AttachesCorporateActionsToTheirWeek()
     {

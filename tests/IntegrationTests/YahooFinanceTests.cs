@@ -94,6 +94,46 @@ public class YahooFinanceTests
         Assert.That(records.Any(e => e.Dividend > 0), Is.True);
     }
 
+    [TestCase("MSFT", EYahooInterval.Weekly)]
+    [TestCase("8058.T", EYahooInterval.Weekly)]
+    [TestCase("BTC-USD", EYahooInterval.Weekly)]
+    [TestCase("MSFT", EYahooInterval.Monthly)]
+    [TestCase("8058.T", EYahooInterval.Monthly)]
+    [TestCase("BTC-USD", EYahooInterval.Monthly)]
+    public async Task GetRecordsAsync_CoarseInterval_HasOneRecordPerPeriod(string symbol, EYahooInterval interval)
+    {
+        // Yahoo sends the unfinished period as two bars; they must come back as one record,
+        // dated like every other - on a Monday, or on the 1st.
+        var records = (await _service.GetRecordsAsync(symbol, DateTime.UtcNow.Date.AddDays(-100), DateTime.UtcNow.Date, interval)).ToList();
+
+        Assert.That(records.Select(e => e.Date), Is.Unique);
+        Assert.That(
+            records.Select(e => e.Date),
+            interval == EYahooInterval.Weekly
+                ? Has.All.Matches<DateTime>(date => date.DayOfWeek == DayOfWeek.Monday)
+                : Has.All.Matches<DateTime>(date => date.Day == 1));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_CurrentWeek_MatchesItsDays()
+    {
+        // The current week is merged from Yahoo's two bars. Should Yahoo ever fold today into the
+        // first while still sending the second, today would count twice - the week's own days
+        // would no longer add up to it. Bitcoin trades every day, so the week always has days.
+        var today = DateTime.UtcNow.Date;
+        var monday = today.AddDays(-(((int)today.DayOfWeek + 6) % 7));
+
+        var days = (await _service.GetRecordsAsync("BTC-USD", monday, today)).ToList();
+        var week = (await _service.GetRecordsAsync("BTC-USD", monday, today, EYahooInterval.Weekly)).Single();
+
+        // a few seconds pass between the two requests while trading goes on
+        Assert.That(week.Date, Is.EqualTo(monday));
+        Assert.That(week.Volume, Is.EqualTo(days.Sum(e => e.Volume ?? 0)).Within(1).Percent);
+        Assert.That(week.High, Is.EqualTo(days.Max(e => e.High)).Within(1).Percent);
+        Assert.That(week.Low, Is.EqualTo(days.Min(e => e.Low)).Within(1).Percent);
+        Assert.That(week.Close, Is.EqualTo(days[0].Close).Within(1).Percent);
+    }
+
     [Test]
     public async Task GetRecordsAsync_Weekly_CarriesTheWeeksDividend()
     {

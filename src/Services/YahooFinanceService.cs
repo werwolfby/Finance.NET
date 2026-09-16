@@ -493,14 +493,15 @@ public class YahooFinanceService : IYahooFinanceService
                 // Yahoo emits null columns for halted or untraded periods
                 continue;
             }
-            var date = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
+            var day = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
+            var date = GetPeriodStart(day, interval);
             // a record is dated at the start of its period, so keep every period that overlaps
             // the range - including the one that began before startDate
             if (date > endDate || GetPeriodEnd(date, interval) <= startDate)
             {
                 continue;
             }
-            records.Add(new Record
+            var record = new Record
             {
                 Date = date,
                 Open = ToDecimal(ElementAtOrNull(quote.Open, i)),
@@ -509,11 +510,20 @@ public class YahooFinanceService : IYahooFinanceService
                 Close = ToDecimal(close),
                 AdjustedClose = ToDecimal(ElementAtOrNull(adjClose, i)) ?? ToDecimal(close),
                 Volume = ElementAtOrNull(quote.Volume, i),
-                // looked up by the record's own date: the current period's live record is stamped
-                // with today, and must not repeat what the period's record already carries
                 Dividend = dividends.TryGetValue(date, out var dividend) ? dividend : null,
                 SplitCoefficient = splits.TryGetValue(date, out var split) ? split : null,
-            });
+            };
+
+            // Yahoo sends an unfinished week or month as two bars: one up to yesterday, stamped
+            // with the period's start, and one for today alone, stamped with the last trade.
+            // Together they are the period so far. A daily bar already covers today, so a day is
+            // never merged - Yahoo sends it once.
+            if (interval != EYahooInterval.Daily && records.Count > 0 && records[^1].Date == date)
+            {
+                records[^1] = MergeWithToday(records[^1], record);
+                continue;
+            }
+            records.Add(record);
         }
 
         // Yahoo serves oldest first, but the HTML page this replaced listed newest first,
@@ -521,6 +531,18 @@ public class YahooFinanceService : IYahooFinanceService
         records.Reverse();
         return records;
     }
+
+    /// <summary>
+    /// Extends a period's record, which runs up to yesterday, with today's bar.
+    /// </summary>
+    private static Record MergeWithToday(Record period, Record today) => period with
+    {
+        High = period.High == null || today.High > period.High ? today.High : period.High,
+        Low = period.Low == null || today.Low < period.Low ? today.Low : period.Low,
+        Close = today.Close,
+        AdjustedClose = today.AdjustedClose,
+        Volume = period.Volume == null && today.Volume == null ? null : (period.Volume ?? 0) + (today.Volume ?? 0),
+    };
 
     /// <summary>
     /// The date Yahoo stamps the record covering <paramref name="date"/> with.
