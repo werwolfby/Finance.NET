@@ -86,7 +86,7 @@ public class CancellationTokenPropagationTests
             _mockPolicyRegistry.Object,
             mockSession.Object);
 
-        AssertCancelsPromptly(token => service.GetRecordsAsync("IBM", new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc), null, token: token));
+        AssertCancelsPromptly(token => service.GetRecordsAsync("IBM", new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc), null, token));
     }
 
     [Test]

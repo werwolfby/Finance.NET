@@ -525,6 +525,29 @@ public class YahooFinanceServiceTests
         Assert.That(result.Count(e => e.Dividend != null), Is.EqualTo(1));
     }
 
+    [Test]
+    public async Task GetRecordsAsync_WithoutInterval_StillRequestsDaily()
+    {
+        // The four-argument overload is the shape callers compiled against before intervals
+        // existed. It has to keep meaning "daily", positional token and all.
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records.json");
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        await service.GetRecordsAsync(
+            "NVDA",
+            new DateTime(2024, 5, 1, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2024, 7, 30, 0, 0, 0, DateTimeKind.Utc),
+            CancellationToken.None);
+
+        Assert.That(requests, Has.Count.EqualTo(1));
+        Assert.That(requests[0], Does.Contain("interval=1d"));
+    }
+
     [TestCase(EYahooInterval.Daily, "1d")]
     [TestCase(EYahooInterval.Weekly, "1wk")]
     [TestCase(EYahooInterval.Monthly, "1mo")]
