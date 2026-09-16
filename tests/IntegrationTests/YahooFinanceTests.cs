@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Finance.Net.Enums;
 using Finance.Net.Exceptions;
 using Finance.Net.Interfaces;
+using Finance.Net.Models.Yahoo;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
 using NUnit.Framework;
@@ -90,6 +93,19 @@ public class YahooFinanceTests
         Assert.That(records.Any(e => e.Dividend > 0), Is.True);
     }
 
+    [TestCase(EYahooInterval.Weekly, "2024-05-15", "2024-05-17", "2024-05-13")]
+    [TestCase(EYahooInterval.Monthly, "2024-05-15", "2024-06-20", "2024-06-01,2024-05-01")]
+    public async Task GetRecordsAsync_StartMidPeriod_ReturnsThePeriodContainingIt(EYahooInterval interval, string start, string end, string expected)
+    {
+        var records = await _service.GetRecordsAsync(
+            "MSFT",
+            DateTime.Parse(start, CultureInfo.InvariantCulture),
+            DateTime.Parse(end, CultureInfo.InvariantCulture),
+            interval);
+
+        Assert.That(records.Select(e => e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), Is.EqualTo(expected.Split(',')));
+    }
+
     [TestCase(EYahooInterval.Daily, 200)]
     [TestCase(EYahooInterval.Weekly, 40)]
     [TestCase(EYahooInterval.Monthly, 10)]
@@ -168,6 +184,58 @@ public class YahooFinanceTests
         Assert.That(records.Count, Is.GreaterThan(records.Select(e => e.DateTime.Date).Distinct().Count()));
 
         Assert.Pass($"cnt = {records.Count}, first = {records[0].DateTime:yyyy-MM-dd HH:mm}, last = {records[^1].DateTime:yyyy-MM-dd HH:mm}");
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_ExchangeAheadOfUtc_KeepsTheOpeningBars()
+    {
+        // NZX opens at 10:00 local, before UTC midnight, so a single-day request must still bring the morning.
+        var hasMorning = await AnyRecentDayAsync(
+            "AIR.NZ",
+            day => day.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday),
+            records => records.Min(e => e.DateTime).Hour < 12);
+
+        Assert.That(hasMorning, Is.True);
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_ExchangeBehindUtc_KeepsTheEveningSession()
+    {
+        // E-mini futures trade on into the New York evening, past UTC midnight.
+        var hasEvening = await AnyRecentDayAsync(
+            "ES=F",
+            day => day.DayOfWeek is >= DayOfWeek.Monday and <= DayOfWeek.Thursday,
+            records => records.Max(e => e.DateTime).Hour >= 20);
+
+        Assert.That(hasEvening, Is.True);
+    }
+
+    /// <summary>
+    /// Requests single recent days one at a time until one passes <paramref name="check"/>, so a
+    /// market holiday on any one of them cannot fail the test.
+    /// </summary>
+    private async Task<bool> AnyRecentDayAsync(string symbol, Func<DateTime, bool> isCandidate, Func<List<IntradayRecord>, bool> check)
+    {
+        var candidates = Enumerable.Range(1, 10)
+            .Select(daysBack => DateTime.UtcNow.Date.AddDays(-daysBack))
+            .Where(isCandidate)
+            .Take(3);
+        foreach (var day in candidates)
+        {
+            try
+            {
+                var records = (await _service.GetIntradayRecordsAsync(symbol, day, day, EInterval.Interval_5Min)).ToList();
+                if (check(records))
+                {
+                    return true;
+                }
+            }
+            catch (FinanceNetNoDataException)
+            {
+                // a holiday - try the next day
+            }
+        }
+        return false;
     }
 
     [Test]
