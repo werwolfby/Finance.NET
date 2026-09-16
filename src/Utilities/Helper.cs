@@ -136,16 +136,20 @@ internal static class Helper
         throw new FormatException($"Invalid date format {dateString}");
     }
 
+    /// <summary>
+    /// The wire value of an enum member, from its <see cref="DescriptionAttribute"/>.
+    /// </summary>
+    /// <remarks>
+    /// Throws rather than returning an empty value: an empty parameter in a request can be answered
+    /// with the provider's default instead of an error, which turns a bug into wrong data.
+    /// </remarks>
     public static string GetDescription(this Enum value)
     {
         var field = value.GetType().GetField(value.ToString());
-        if (field == null)
-        {
-            return "";
-        }
-
-        var attribute = (DescriptionAttribute)Attribute.GetCustomAttribute(field, typeof(DescriptionAttribute));
-        return attribute?.Description ?? "";
+        var attribute = field == null ? null : (DescriptionAttribute)Attribute.GetCustomAttribute(field, typeof(DescriptionAttribute));
+        return string.IsNullOrEmpty(attribute?.Description)
+            ? throw new FinanceNetException($"Unsupported {value.GetType().Name} value {value}")
+            : attribute.Description;
     }
     public static string CreateRandomUserAgent(Func<int, int, int> random)
     {

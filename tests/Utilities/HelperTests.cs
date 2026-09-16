@@ -1,5 +1,6 @@
 ﻿using System;
 using Finance.Net.Enums;
+using Finance.Net.Exceptions;
 using Finance.Net.Models.Yahoo.Dtos;
 using Finance.Net.Utilities;
 using NUnit.Framework;
@@ -160,6 +161,26 @@ public class HelperTests
 
         // Assert
         Assert.That(result, Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void Description_MemberWithoutAttribute_Throws()
+    {
+        // A member added without [Description] must fail loudly. An empty value in a request can be
+        // answered with the provider's default instead of an error - wrong data, not a failure.
+        Assert.Throws<FinanceNetException>(() => Undescribed.NoAttribute.GetDescription());
+    }
+
+    [TestCase((EInterval)99)]
+    [TestCase((EYahooInterval)99)]
+    public void Description_UndefinedValue_Throws(Enum value)
+    {
+        Assert.Throws<FinanceNetException>(() => value.GetDescription());
+    }
+
+    private enum Undescribed
+    {
+        NoAttribute = 1,
     }
 
     [Test]
