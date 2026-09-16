@@ -838,9 +838,9 @@ public class YahooFinanceServiceTests
     public async Task GetIntradayRecordsAsync_RangeExceedsMaxSpanPerRequest_SplitsIntoChunks()
     {
         // Yahoo serves at most 8 days of 1m data per request, so a 20 day range needs several.
-        // Arrange
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
-        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        // Arrange - bars are generated onto the days the range covers, see BuildIntradayChartJson
+        var startDate = DateTime.UtcNow.AddDays(-20).Date;
+        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildIntradayChartJson(startDate, 21));
 
         var service = new YahooFinanceService(
             _mockLogger.Object,
@@ -851,7 +851,7 @@ public class YahooFinanceServiceTests
         // Act
         await service.GetIntradayRecordsAsync(
             "MSFT",
-            DateTime.UtcNow.AddDays(-20).Date,
+            startDate,
             DateTime.UtcNow.Date,
             EInterval.Interval_1Min);
 
@@ -863,9 +863,10 @@ public class YahooFinanceServiceTests
     [Test]
     public async Task GetIntradayRecordsAsync_StartBeyondRetention_ClampsToWhatYahooKeeps()
     {
-        // Arrange
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "intraday_records.json");
-        var requests = SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        // Arrange - bars land just inside the retention boundary the service should clamp to
+        var requests = SetupHttpResponseCapturingRequests(
+            HttpStatusCode.OK,
+            BuildIntradayChartJson(DateTime.UtcNow.Date.AddDays(-729), 30));
 
         var service = new YahooFinanceService(
             _mockLogger.Object,
@@ -928,6 +929,36 @@ public class YahooFinanceServiceTests
         registry.Setup(e => e.Get<AsyncPolicy>(Constants.DefaultHttpRetryPolicy)).Returns(policy);
         registry.Setup(e => e.Get<IAsyncPolicy>(Constants.DefaultHttpRetryPolicy)).Returns(policy);
         return registry.Object;
+    }
+
+    /// <summary>
+    /// Builds a chart payload whose bars sit on the days the test is about to request.
+    /// </summary>
+    /// <remarks>
+    /// A fixture with fixed timestamps rots. The service measures Yahoo's retention window
+    /// from <see cref="DateTime.UtcNow"/>, so bars written down once eventually fall outside
+    /// every range it will accept - first the range under test, then the retention guard.
+    /// Generating them keeps the data and the requested window moving together.
+    /// The offset is zero so exchange-local dates equal the UTC dates the test asks for.
+    /// </remarks>
+    private static string BuildIntradayChartJson(DateTime firstBarDate, int days)
+    {
+        var timestamps = Enumerable.Range(0, days)
+            .Select(day => Helper.ToUnixTime(firstBarDate.Date.AddDays(day).AddHours(14)).Value)
+            .Select(unixTime => unixTime.ToString(CultureInfo.InvariantCulture))
+            .ToList();
+        var prices = string.Join(",", timestamps.Select(_ => "1.0"));
+        var volumes = string.Join(",", timestamps.Select(_ => "100"));
+        return "{\"chart\":{\"result\":[{"
+            + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":0},"
+            + "\"timestamp\":[" + string.Join(",", timestamps) + "],"
+            + "\"indicators\":{\"quote\":[{"
+            + "\"open\":[" + prices + "],"
+            + "\"high\":[" + prices + "],"
+            + "\"low\":[" + prices + "],"
+            + "\"close\":[" + prices + "],"
+            + "\"volume\":[" + volumes + "]}]}}],"
+            + "\"error\":null}}";
     }
 
     private List<string> SetupHttpResponseCapturingRequests(HttpStatusCode statusCode, string content)
