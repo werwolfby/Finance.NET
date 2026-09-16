@@ -931,6 +931,44 @@ public class YahooFinanceServiceTests
         return registry.Object;
     }
 
+    [Test]
+    public void GetIntradayRecordsAsync_StartInFutureWithoutEndDate_ThrowsArgumentError()
+    {
+        // Omitting endDate must not skip the range check - the caller's mistake should be
+        // named, not reported as "Yahoo returned no intraday records".
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildIntradayChartJson(DateTime.UtcNow.Date.AddDays(-5), 6));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        var exception = Assert.ThrowsAsync<FinanceNetException>(async () =>
+            await service.GetIntradayRecordsAsync("MSFT", DateTime.UtcNow.Date.AddDays(1)));
+
+        Assert.That(exception, Is.Not.InstanceOf<FinanceNetNoDataException>());
+        Assert.That(exception.Message, Does.Contain("startDate"));
+    }
+
+    [Test]
+    public void GetIntradayRecordsAsync_UnsupportedInterval_ThrowsFinanceNetException()
+    {
+        // Every failure the library surfaces is a FinanceNetException, including a bad argument.
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildIntradayChartJson(DateTime.UtcNow.Date.AddDays(-5), 6));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        Assert.ThrowsAsync<FinanceNetException>(async () =>
+            await service.GetIntradayRecordsAsync(
+                "MSFT",
+                DateTime.UtcNow.Date.AddDays(-1),
+                DateTime.UtcNow.Date,
+                (EInterval)99));
+    }
+
     /// <summary>
     /// Builds a chart payload whose bars sit on the days the test is about to request.
     /// </summary>

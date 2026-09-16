@@ -95,14 +95,15 @@ public class YahooFinanceService : IYahooFinanceService
     /// <inheritdoc />
     public async Task<IEnumerable<IntradayRecord>> GetIntradayRecordsAsync(string symbol, DateTime startDate, DateTime? endDate = null, EInterval interval = EInterval.Interval_15Min, CancellationToken token = default)
     {
-        if (endDate != null && startDate > endDate)
-        {
-            throw new FinanceNetException("startDate earlier than endDate");
-        }
         endDate ??= DateTime.UtcNow.Date;
         if (endDate.Value.Date > DateTime.UtcNow.Date)
         {
             endDate = DateTime.UtcNow.Date;
+        }
+        // checked once endDate is settled, so omitting it cannot skip the check
+        if (startDate.Date > endDate.Value.Date)
+        {
+            throw new FinanceNetException("startDate must not be later than endDate");
         }
 
         var limits = GetChartLimits(interval);
@@ -240,7 +241,7 @@ public class YahooFinanceService : IYahooFinanceService
         EInterval.Interval_15Min => (60, 60),
         EInterval.Interval_30Min => (60, 60),
         EInterval.Interval_60Min => (730, 730),
-        _ => throw new NotSupportedException($"Unsupported interval {interval}"),
+        _ => throw new FinanceNetException($"Unsupported interval {interval}"),
     };
 
     /// <summary>
@@ -253,7 +254,7 @@ public class YahooFinanceService : IYahooFinanceService
         EInterval.Interval_15Min => "15m",
         EInterval.Interval_30Min => "30m",
         EInterval.Interval_60Min => "60m",
-        _ => throw new NotSupportedException($"Unsupported interval {interval}"),
+        _ => throw new FinanceNetException($"Unsupported interval {interval}"),
     };
 
     /// <summary>
