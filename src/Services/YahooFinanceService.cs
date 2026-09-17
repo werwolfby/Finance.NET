@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -184,7 +185,7 @@ public class YahooFinanceService : IYahooFinanceService
                 return chartResult == null
                     ? []
                     // filter against this chunk, so the trailing bar Yahoo appends cannot be added once per chunk
-                    : ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1), interval);
+                    : ParseIntradayRecords(chartResult, GetExchangeClock(chartResult.Meta), startDate, endExclusive.AddDays(-1), interval);
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -306,7 +307,7 @@ public class YahooFinanceService : IYahooFinanceService
     /// Yahoo appends the current partial bar even when it lies outside the requested period,
     /// so the range is re-applied here rather than trusted from the response.
     /// </remarks>
-    private static List<IntradayRecord> ParseIntradayRecords(ChartResult chartResult, DateTime startDate, DateTime endDate, EInterval interval)
+    private static List<IntradayRecord> ParseIntradayRecords(ChartResult chartResult, ExchangeClock clock, DateTime startDate, DateTime endDate, EInterval interval)
     {
         var records = new List<IntradayRecord>();
         var timestamps = chartResult.Timestamp;
@@ -315,7 +316,6 @@ public class YahooFinanceService : IYahooFinanceService
         {
             return records;
         }
-        var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
         var priceHint = chartResult.Meta?.PriceHint;
 
         for (var i = 0; i < timestamps.Count; i++)
@@ -329,7 +329,7 @@ public class YahooFinanceService : IYahooFinanceService
                 // Yahoo emits null columns for halted or untraded buckets
                 continue;
             }
-            var dateTime = ToExchangeTime(timestamps[i], offset);
+            var dateTime = clock.ToTime(timestamps[i]);
             if (dateTime.Date < startDate || dateTime.Date > endDate)
             {
                 continue;
@@ -497,7 +497,7 @@ public class YahooFinanceService : IYahooFinanceService
                 }
                 var chartResult = chart.Result?.FirstOrDefault() ?? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}");
 
-                var records = ParseRecords(chartResult, startDate.Value.Date, endDate.Value.Date, interval);
+                var records = ParseRecords(chartResult, GetExchangeClock(chartResult.Meta), startDate.Value.Date, endDate.Value.Date, interval);
                 return records.IsNullOrEmpty() ? throw new FinanceNetNoDataException($"Yahoo returned no records for {symbol}") : records;
             }, token).ConfigureAwait(false);
         }
@@ -515,7 +515,7 @@ public class YahooFinanceService : IYahooFinanceService
     /// Projects the column-oriented chart payload into records, attaching any corporate action
     /// that fell on the same date.
     /// </summary>
-    private static List<Record> ParseRecords(ChartResult chartResult, DateTime startDate, DateTime endDate, EYahooInterval interval)
+    private static List<Record> ParseRecords(ChartResult chartResult, ExchangeClock clock, DateTime startDate, DateTime endDate, EYahooInterval interval)
     {
         var records = new List<Record>();
         var timestamps = chartResult.Timestamp;
@@ -524,17 +524,16 @@ public class YahooFinanceService : IYahooFinanceService
         {
             return records;
         }
-        var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
         var priceHint = chartResult.Meta?.PriceHint;
         var adjClose = chartResult.Indicators?.AdjClose?.FirstOrDefault()?.AdjClose;
-        var dividends = TotalEventsByPeriod(chartResult.Events?.Dividends, e => e.Date, e => ToDecimal(e.Amount), (a, b) => a + b, offset, interval);
-        var splits = TotalEventsByPeriod(chartResult.Events?.Splits, e => e.Date, ToSplitCoefficient, (a, b) => a * b, offset, interval);
+        var dividends = TotalEventsByPeriod(chartResult.Events?.Dividends, e => e.Date, e => ToDecimal(e.Amount), (a, b) => a + b, clock, interval);
+        var splits = TotalEventsByPeriod(chartResult.Events?.Splits, e => e.Date, ToSplitCoefficient, (a, b) => a * b, clock, interval);
 
         for (var i = 0; i < timestamps.Count; i++)
         {
-            var day = ToExchangeDate(timestamps[i], offset);
+            var day = clock.ToDate(timestamps[i]);
             var close = ElementAtOrNull(quote.Close, i)
-                ?? (interval == EYahooInterval.Daily && i == timestamps.Count - 1 ? GetPendingClose(chartResult.Meta, quote, i, day, offset) : null);
+                ?? (interval == EYahooInterval.Daily && i == timestamps.Count - 1 ? GetPendingClose(chartResult.Meta, clock, quote, i, day) : null);
             if (close == null)
             {
                 // Yahoo emits null columns for halted or untraded periods
@@ -589,9 +588,9 @@ public class YahooFinanceService : IYahooFinanceService
     /// latest price, as for any unfinished day. It only stands in when the latest trade happened
     /// on that day and the day traded; any other missing close is a halted or untraded day.
     /// </remarks>
-    private static double? GetPendingClose(ChartMeta? meta, ChartQuote quote, int index, DateTime day, TimeSpan offset)
+    private static double? GetPendingClose(ChartMeta? meta, ExchangeClock clock, ChartQuote quote, int index, DateTime day)
     {
-        var latestTrade = Helper.UnixToDateTime(meta?.RegularMarketTime)?.Add(offset).Date;
+        var latestTrade = meta?.RegularMarketTime is { } time ? clock.ToDate(time) : (DateTime?)null;
         return latestTrade == day && ElementAtOrNull(quote.Open, index) != null && ElementAtOrNull(quote.Volume, index) > 0
             ? meta?.RegularMarketPrice
             : null;
@@ -645,7 +644,7 @@ public class YahooFinanceService : IYahooFinanceService
         Func<TEvent, long> getDate,
         Func<TEvent, decimal?> getValue,
         Func<decimal, decimal, decimal> combine,
-        TimeSpan offset,
+        ExchangeClock clock,
         EYahooInterval interval)
     {
         var totals = new Dictionary<DateTime, decimal>();
@@ -656,7 +655,7 @@ public class YahooFinanceService : IYahooFinanceService
             {
                 continue;
             }
-            var period = GetPeriodStart(ToExchangeDate(getDate(item), offset), interval);
+            var period = GetPeriodStart(clock.ToDate(getDate(item)), interval);
             totals[period] = totals.TryGetValue(period, out var total) ? combine(total, value.Value) : value.Value;
         }
         return totals;
@@ -688,17 +687,75 @@ public class YahooFinanceService : IYahooFinanceService
     private static double ToPrice(double value, int? priceHint)
         => priceHint is >= 0 and <= 10 ? Math.Round(value, priceHint.Value, MidpointRounding.AwayFromZero) : value;
 
-    /// <summary>
-    /// The exchange's wall-clock time at a timestamp. It is local to the exchange, not an instant
-    /// in UTC, so it carries no time zone - as Alpha Vantage's intraday times do.
-    /// </summary>
-    private static DateTime ToExchangeTime(long unixTime, TimeSpan offset)
-        => DateTime.SpecifyKind((Helper.UnixToDateTime(unixTime) ?? DateTime.UnixEpoch).Add(offset), DateTimeKind.Unspecified);
+    private static readonly ConcurrentDictionary<string, TimeZoneInfo?> ExchangeTimeZones = new();
 
     /// <summary>
-    /// The exchange's calendar day a timestamp falls on.
+    /// The clock the timestamps of a chart response are read with.
     /// </summary>
-    private static DateTime ToExchangeDate(long unixTime, TimeSpan offset) => ToExchangeTime(unixTime, offset).Date;
+    private ExchangeClock GetExchangeClock(ChartMeta? meta)
+    {
+        var currentOffset = TimeSpan.FromSeconds(meta?.GmtOffset ?? 0);
+        var zoneName = meta?.ExchangeTimezoneName;
+        if (string.IsNullOrEmpty(zoneName))
+        {
+            return new ExchangeClock(null, currentOffset);
+        }
+        var zone = ExchangeTimeZones.GetOrAdd(zoneName, name =>
+        {
+            try
+            {
+                return TimeZoneInfo.FindSystemTimeZoneById(name);
+            }
+            catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+            {
+                // said once per zone: the platform will not learn it later
+                _logger.LogWarning(
+                    ex,
+                    "Time zone {TimeZone} is unknown on this platform. Reading its times with Yahoo's current offset, which is an hour off across daylight-saving changes.",
+                    name);
+                return null;
+            }
+        });
+        return new ExchangeClock(zone, currentOffset);
+    }
+
+    /// <summary>
+    /// Reads Yahoo's timestamps as the exchange's wall-clock time.
+    /// </summary>
+    /// <remarks>
+    /// Yahoo's gmtoffset is the exchange's offset now, which is an hour off for any timestamp on
+    /// the other side of a daylight-saving change: intraday bars came out an hour late, and a
+    /// weekly or monthly bar stamped at midnight fell on the day before - into the period before.
+    /// The exchange's time zone gives every timestamp its own offset. Where the platform does not
+    /// know the zone, the current offset is the best there is.
+    /// </remarks>
+    private readonly struct ExchangeClock
+    {
+        private readonly TimeZoneInfo? _zone;
+        private readonly TimeSpan _currentOffset;
+
+        public ExchangeClock(TimeZoneInfo? zone, TimeSpan currentOffset)
+        {
+            _zone = zone;
+            _currentOffset = currentOffset;
+        }
+
+        /// <summary>
+        /// The exchange's wall-clock time at a timestamp. It is local to the exchange, not an
+        /// instant in UTC, so it carries no time zone - as Alpha Vantage's intraday times do.
+        /// </summary>
+        public DateTime ToTime(long unixTime)
+        {
+            var utc = Helper.UnixToDateTime(unixTime) ?? DateTime.UnixEpoch;
+            var local = _zone == null ? utc + _currentOffset : TimeZoneInfo.ConvertTimeFromUtc(utc, _zone);
+            return DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        }
+
+        /// <summary>
+        /// The exchange's calendar day a timestamp falls on.
+        /// </summary>
+        public DateTime ToDate(long unixTime) => ToTime(unixTime).Date;
+    }
 
     private async Task CheckAndDeclineConsentAsync(IHtmlDocument document, CancellationToken token)
     {

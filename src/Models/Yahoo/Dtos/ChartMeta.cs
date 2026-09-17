@@ -17,6 +17,12 @@ internal record ChartMeta
     public string? Timezone { get; set; }
 
     /// <summary>
+    /// The exchange's time zone, as an IANA name - "America/New_York".
+    /// </summary>
+    [JsonProperty("exchangeTimezoneName")]
+    public string? ExchangeTimezoneName { get; set; }
+
+    /// <summary>
     /// When the latest trade happened, as a Unix timestamp.
     /// </summary>
     [JsonProperty("regularMarketTime")]

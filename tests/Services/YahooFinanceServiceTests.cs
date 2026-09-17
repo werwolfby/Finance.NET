@@ -645,6 +645,101 @@ public class YahooFinanceServiceTests
         Assert.That(record.Date.Kind, Is.EqualTo(DateTimeKind.Unspecified));
     }
 
+    // Yahoo's timestamps, with the offset it sends - the exchange's offset now, which is not the
+    // offset these bars had: they lie on the other side of a daylight-saving change.
+    // Auckland weeks and months start at midnight NZDT (UTC+13), read now at NZST (UTC+12).
+    [TestCase(EYahooInterval.Weekly, "Pacific/Auckland", 43200, "2024-01-01", "2024-01-21",
+        new long[] { 1704020400, 1704625200, 1705230000 }, new[] { 0.65, 0.645, 0.645 },
+        new[] { "2024-01-15 0.645", "2024-01-08 0.645", "2024-01-01 0.65" })]
+    [TestCase(EYahooInterval.Monthly, "Pacific/Auckland", 43200, "2023-12-01", "2024-01-31",
+        new long[] { 1701342000, 1704020400 }, new[] { 0.635, 0.615 },
+        new[] { "2024-01-01 0.615", "2023-12-01 0.635" })]
+    // EURUSD=X days start at midnight in London, BST in summer, read in winter at GMT
+    [TestCase(EYahooInterval.Daily, "Europe/London", 0, "2024-07-01", "2024-07-02",
+        new long[] { 1719788400, 1719874800 }, new[] { 1.0712, 1.0741 },
+        new[] { "2024-07-02 1.0741", "2024-07-01 1.0712" })]
+    public async Task GetRecordsAsync_AcrossDaylightSavingChange_KeepsTheExchangesCalendar(
+        EYahooInterval interval, string timeZone, int currentOffset, string start, string end, long[] timestamps, double[] closes, string[] expected)
+    {
+        // A record stamped at the exchange's midnight lands on the day before when read an hour
+        // early - and a weekly or monthly one in the period before.
+        // Arrange
+        var bars = timestamps.Zip(closes, (timestamp, close) => new ChartBar(timestamp, close, close, close, close, 100));
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(bars, currentOffset, timeZone: timeZone));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetRecordsAsync(
+            "X",
+            DateTime.Parse(start, CultureInfo.InvariantCulture),
+            DateTime.Parse(end, CultureInfo.InvariantCulture),
+            interval);
+
+        // Assert
+        Assert.That(result.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Date:yyyy-MM-dd} {e.Close}")), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_AcrossDaylightSavingChange_KeepsWallClockTime()
+    {
+        // Yahoo sends New York's offset now. Bars from before its last clock change were an hour
+        // off with it - both sides of the change must read 09:30 and 10:30.
+        // Arrange
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        var change = TestHelper.LastDaylightSavingChange(zone);
+        var times = new[] { change.AddDays(-1), change.AddDays(1) }
+            .SelectMany(day => new[] { day.AddHours(9.5), day.AddHours(10.5) })
+            .ToList();
+        var bars = times.Select(time => new ChartBar(Helper.ToUnixTime(TimeZoneInfo.ConvertTimeToUtc(time, zone)).Value, 1.0, 1.0, 1.0, 1.0, 100));
+        var currentOffset = (int)zone.GetUtcOffset(DateTime.UtcNow).TotalSeconds;
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(bars, currentOffset, timeZone: zone.Id));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetIntradayRecordsAsync("MSFT", change.AddDays(-1), change.AddDays(1), EInterval.Interval_60Min);
+
+        // Assert
+        Assert.That(result.Select(e => e.DateTime), Is.EquivalentTo(times));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_UnknownTimeZone_FallsBackToYahoosOffsetWithAWarning()
+    {
+        // Where the platform does not know the exchange's zone, Yahoo's current offset is the best
+        // there is - right for the season it is in, an hour off across a clock change.
+        // Arrange
+        var bar = new ChartBar(1722432600, 418.35, 418.35, 418.35, 418.35, 100);
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson([bar], -14400, timeZone: "Mars/Olympus_Mons"));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+        var day = new DateTime(2024, 7, 31, 0, 0, 0, DateTimeKind.Unspecified);
+
+        // Act
+        var result = await service.GetRecordsAsync("X", day, day);
+
+        // Assert
+        Assert.That(result.Single().Date, Is.EqualTo(day));
+        _mockLogger.Verify(
+            logger => logger.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString().Contains("Mars/Olympus_Mons")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+            Times.Once);
+    }
+
     [Test]
     public async Task GetRecordsAsync_NewestDayWithoutClose_TakesYahoosLatestPrice()
     {
@@ -1583,14 +1678,15 @@ public class YahooFinanceServiceTests
     private static string BuildChartJson(IEnumerable<long> timestamps, int gmtOffsetSeconds, string events = null)
         => BuildChartJson(timestamps.Select(unixTime => new ChartBar(unixTime, 1.0, 1.0, 1.0, 1.0, 100)), gmtOffsetSeconds, events);
 
-    private static string BuildChartJson(IEnumerable<ChartBar> bars, int gmtOffsetSeconds, string events = null, int? priceHint = null)
+    private static string BuildChartJson(IEnumerable<ChartBar> bars, int gmtOffsetSeconds, string events = null, int? priceHint = null, string timeZone = null)
     {
         var rows = bars.ToList();
         string Column<T>(Func<ChartBar, T> value) where T : IFormattable
             => string.Join(",", rows.Select(row => value(row).ToString(null, CultureInfo.InvariantCulture)));
         return "{\"chart\":{\"result\":[{"
             + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":" + gmtOffsetSeconds.ToString(CultureInfo.InvariantCulture)
-            + (priceHint == null ? "" : ",\"priceHint\":" + priceHint.Value.ToString(CultureInfo.InvariantCulture)) + "},"
+            + (priceHint == null ? "" : ",\"priceHint\":" + priceHint.Value.ToString(CultureInfo.InvariantCulture))
+            + (timeZone == null ? "" : ",\"exchangeTimezoneName\":\"" + timeZone + "\"") + "},"
             + "\"timestamp\":[" + Column(row => row.Timestamp) + "],"
             + (events == null ? "" : "\"events\":" + events + ",")
             + "\"indicators\":{\"quote\":[{"

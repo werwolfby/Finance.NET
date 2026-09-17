@@ -47,4 +47,21 @@ internal static class TestHelper
         });
         return services.BuildServiceProvider();
     }
+
+    /// <summary>
+    /// The local date of the most recent daylight-saving change in <paramref name="zone"/> - the
+    /// first day whose midday offset differs from the day before's.
+    /// </summary>
+    public static System.DateTime LastDaylightSavingChange(System.TimeZoneInfo zone)
+    {
+        var day = System.DateTime.SpecifyKind(System.DateTime.UtcNow.Date.AddDays(-2), System.DateTimeKind.Unspecified);
+        for (var i = 0; i < 400; i++, day = day.AddDays(-1))
+        {
+            if (zone.GetUtcOffset(day.AddHours(12)) != zone.GetUtcOffset(day.AddDays(-1).AddHours(12)))
+            {
+                return day;
+            }
+        }
+        throw new System.InvalidOperationException($"{zone.Id} has not changed its clocks in the last 400 days");
+    }
 }

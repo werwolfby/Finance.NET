@@ -94,6 +94,59 @@ public class YahooFinanceTests
         Assert.That(records.Any(e => e.Dividend > 0), Is.True);
     }
 
+    [TestCase("AIR.NZ", EYahooInterval.Weekly, "2024-02-01", "2024-05-31")]   // New Zealand left daylight saving on 2024-04-07
+    [TestCase("AIR.NZ", EYahooInterval.Monthly, "2023-08-01", "2024-06-30")]  // ... and entered it on 2023-09-24
+    [TestCase("MSFT", EYahooInterval.Weekly, "2024-09-01", "2024-12-31")]     // the US left it on 2024-11-03
+    [TestCase("MSFT", EYahooInterval.Monthly, "2024-01-01", "2024-12-31")]
+    public async Task GetRecordsAsync_CoarseInterval_ClosesWithItsLastDay(string symbol, EYahooInterval interval, string start, string end)
+    {
+        // A weekly or monthly record must hold the period it is dated with, so it closes with that
+        // period's last day. Across a daylight-saving change, records used to land a period early.
+        var startDate = DateTime.Parse(start, CultureInfo.InvariantCulture);
+        var endDate = DateTime.Parse(end, CultureInfo.InvariantCulture);
+        var periods = (await _service.GetRecordsAsync(symbol, startDate, endDate, interval)).ToList();
+        var days = (await _service.GetRecordsAsync(symbol, startDate, endDate)).ToList();
+
+        var checkedPeriods = 0;
+        foreach (var period in periods)
+        {
+            var periodEnd = interval == EYahooInterval.Weekly ? period.Date.AddDays(7) : period.Date.AddMonths(1);
+            if (period.Date < startDate || periodEnd > endDate.AddDays(1))
+            {
+                continue;   // only partly requested, so its last day may lie outside the range
+            }
+            var lastDay = days.Where(day => day.Date >= period.Date && day.Date < periodEnd).MaxBy(day => day.Date);
+            Assert.That(period.Close, Is.EqualTo(lastDay.Close), $"{interval} record of {period.Date:yyyy-MM-dd}");
+            checkedPeriods++;
+        }
+        Assert.That(checkedPeriods, Is.GreaterThan(3));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_BeforeTheLastClockChange_KeepsNewYorkHours()
+    {
+        // Yahoo sends New York's offset now. A session from before the last clock change must still
+        // run 09:30 to 15:30 - it used to come out an hour off. Several days are tried, as any one
+        // may be a holiday or a short session.
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        var change = TestHelper.LastDaylightSavingChange(zone);
+        var candidates = Enumerable.Range(1, 7)
+            .Select(daysBefore => change.AddDays(-daysBefore))
+            .Where(day => day.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday))
+            .Take(3);
+        foreach (var day in candidates)
+        {
+            var bars = (await _service.GetIntradayRecordsAsync("MSFT", day, day, EInterval.Interval_60Min)).ToList();
+            if (bars.Count >= 7)
+            {
+                Assert.That(bars.Min(e => e.DateTime.TimeOfDay), Is.EqualTo(new TimeSpan(9, 30, 0)));
+                Assert.That(bars.Max(e => e.DateTime.TimeOfDay), Is.EqualTo(new TimeSpan(15, 30, 0)));
+                return;
+            }
+        }
+        Assert.Fail($"no full session in the week before {change:yyyy-MM-dd}");
+    }
+
     [TestCase("SAP.DE")]
     [TestCase("8058.T")]
     [TestCase("MSFT")]
