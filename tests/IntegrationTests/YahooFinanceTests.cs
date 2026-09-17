@@ -94,6 +94,21 @@ public class YahooFinanceTests
         Assert.That(records.Any(e => e.Dividend > 0), Is.True);
     }
 
+    [TestCase("SAP.DE")]
+    [TestCase("8058.T")]
+    [TestCase("MSFT")]
+    public async Task GetRecordsAsync_LatestSession_IsIncludedWithItsClose(string symbol)
+    {
+        // Some exchanges get their daily close hours after the session ends. The session must not
+        // go missing meanwhile - the newest day is the day of the newest intraday bar, at its price.
+        var startDate = DateTime.UtcNow.Date.AddDays(-4);
+        var bars = (await _service.GetIntradayRecordsAsync(symbol, startDate, null, EInterval.Interval_15Min)).ToList();
+        var days = (await _service.GetRecordsAsync(symbol, startDate, DateTime.UtcNow.Date)).ToList();
+
+        Assert.That(days[0].Date, Is.EqualTo(bars[0].DateTime.Date));
+        Assert.That((double)days[0].Close.Value, Is.EqualTo(bars[0].Close).Within(1).Percent);
+    }
+
     [TestCase("MSFT", EYahooInterval.Weekly)]
     [TestCase("8058.T", EYahooInterval.Weekly)]
     [TestCase("BTC-USD", EYahooInterval.Weekly)]

@@ -1,0 +1,53 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "symbol": "8058.T",
+          "gmtoffset": 32400,
+          "regularMarketTime": 1789540200,
+          "regularMarketPrice": 4944.0
+        },
+        "timestamp": [
+          1789430400,
+          1789516800
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "open": [
+                4966.0,
+                4963.0
+              ],
+              "high": [
+                4979.0,
+                5009.0
+              ],
+              "low": [
+                4893.0,
+                4929.0
+              ],
+              "close": [
+                4910.0,
+                null
+              ],
+              "volume": [
+                6425900,
+                6513200
+              ]
+            }
+          ],
+          "adjclose": [
+            {
+              "adjclose": [
+                4910.0,
+                null
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

@@ -115,6 +115,9 @@
 	<None Update="TestData\Yahoo\records_monthly_current_period.json">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>
+	<None Update="TestData\Yahoo\records_daily_close_pending.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</None>
 	<None Update="TestData\Yahoo\summary.html">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>

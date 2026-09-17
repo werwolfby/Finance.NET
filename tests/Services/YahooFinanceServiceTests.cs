@@ -18,6 +18,7 @@ using Finance.Net.Utilities;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Moq.Protected;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using Polly;
 using Polly.Registry;
@@ -581,6 +582,83 @@ public class YahooFinanceServiceTests
         Assert.That(merged.Close, Is.EqualTo((decimal)close));
         Assert.That(merged.AdjustedClose, Is.EqualTo((decimal)close));
         Assert.That(merged.Volume, Is.EqualTo(volume));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_NewestDayWithoutClose_TakesYahoosLatestPrice()
+    {
+        // Some exchanges get their daily close hours after the session ends - Tokyo's 09-16 bar had
+        // its prices and volume but no close half a day later. Yahoo's latest price for that day
+        // is the close it fills in afterwards.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records_daily_close_pending.json");
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, await File.ReadAllTextAsync(filePath));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetRecordsAsync(
+            "8058.T",
+            new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Utc))).ToList();
+
+        // Assert
+        Assert.That(result.Select(e => e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), Is.EqualTo(new[] { "2026-09-16", "2026-09-15" }));
+        Assert.That(result[0].Open, Is.EqualTo(4963m));
+        Assert.That(result[0].Close, Is.EqualTo(4944m));
+        Assert.That(result[0].AdjustedClose, Is.EqualTo(4944m));
+        Assert.That(result[0].Volume, Is.EqualTo(6513200));
+    }
+
+    [TestCase("latest trade on another day", new[] { "2026-09-15" })]
+    [TestCase("day without volume", new[] { "2026-09-15" })]
+    [TestCase("not the newest day", new[] { "2026-09-17", "2026-09-15" })]
+    public async Task GetRecordsAsync_DayWithoutClose_IsFilledOnlyWhenItIsTodaysSession(string variation, string[] expected)
+    {
+        // Yahoo's latest price only stands for a close when it belongs to that day's session.
+        // Anywhere else a missing close means a halted or untraded day, which is left out.
+        // Arrange
+        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "TestData", "Yahoo", "records_daily_close_pending.json");
+        var json = JObject.Parse(await File.ReadAllTextAsync(filePath));
+        var result0 = json["chart"]["result"][0];
+        var quote = result0["indicators"]["quote"][0];
+        switch (variation)
+        {
+            case "latest trade on another day":
+                result0["meta"]["regularMarketTime"] = result0["meta"]["regularMarketTime"].Value<long>() - 86400;
+                break;
+            case "day without volume":
+                ((JArray)quote["volume"])[1] = 0;
+                break;
+            default:
+                ((JArray)result0["timestamp"]).Add(result0["timestamp"][1].Value<long>() + 86400);
+                ((JArray)quote["open"]).Add(4950.0);
+                ((JArray)quote["high"]).Add(4990.0);
+                ((JArray)quote["low"]).Add(4940.0);
+                ((JArray)quote["close"]).Add(4980.0);
+                ((JArray)quote["volume"]).Add(5000000);
+                ((JArray)result0["indicators"]["adjclose"][0]["adjclose"]).Add(4980.0);
+                result0["meta"]["regularMarketTime"] = result0["meta"]["regularMarketTime"].Value<long>() + 86400;
+                break;
+        }
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, json.ToString());
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetRecordsAsync(
+            "8058.T",
+            new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 9, 17, 0, 0, 0, DateTimeKind.Utc));
+
+        // Assert
+        Assert.That(result.Select(e => e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), Is.EqualTo(expected));
     }
 
     [Test]

@@ -520,13 +520,14 @@ public class YahooFinanceService : IYahooFinanceService
 
         for (var i = 0; i < timestamps.Count; i++)
         {
-            var close = ElementAtOrNull(quote.Close, i);
+            var day = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
+            var close = ElementAtOrNull(quote.Close, i)
+                ?? (interval == EYahooInterval.Daily && i == timestamps.Count - 1 ? GetPendingClose(chartResult.Meta, quote, i, day, offset) : null);
             if (close == null)
             {
                 // Yahoo emits null columns for halted or untraded periods
                 continue;
             }
-            var day = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
             var date = GetPeriodStart(day, interval);
             // a record is dated at the start of its period, so keep every period that overlaps
             // the range - including the one that began before startDate
@@ -563,6 +564,24 @@ public class YahooFinanceService : IYahooFinanceService
         // as Alpha Vantage does - callers depend on that order.
         records.Reverse();
         return records;
+    }
+
+    /// <summary>
+    /// The close of a session Yahoo has not published yet, read from its latest price.
+    /// </summary>
+    /// <remarks>
+    /// Some exchanges get their daily close hours after the session ends - Tokyo and Xetra left
+    /// the day's close empty for more than half a day, while its prices and volume were there.
+    /// Yahoo's latest price is that close once the session is over, and before then the day's
+    /// latest price, as for any unfinished day. It only stands in when the latest trade happened
+    /// on that day and the day traded; any other missing close is a halted or untraded day.
+    /// </remarks>
+    private static double? GetPendingClose(ChartMeta? meta, ChartQuote quote, int index, DateTime day, TimeSpan offset)
+    {
+        var latestTrade = Helper.UnixToDateTime(meta?.RegularMarketTime)?.Add(offset).Date;
+        return latestTrade == day && ElementAtOrNull(quote.Open, index) != null && ElementAtOrNull(quote.Volume, index) > 0
+            ? meta?.RegularMarketPrice
+            : null;
     }
 
     /// <summary>

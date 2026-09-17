@@ -15,4 +15,16 @@ internal record ChartMeta
 
     [JsonProperty("timezone")]
     public string? Timezone { get; set; }
+
+    /// <summary>
+    /// When the latest trade happened, as a Unix timestamp.
+    /// </summary>
+    [JsonProperty("regularMarketTime")]
+    public long? RegularMarketTime { get; set; }
+
+    /// <summary>
+    /// The price of the latest trade - the close, once the session has ended.
+    /// </summary>
+    [JsonProperty("regularMarketPrice")]
+    public double? RegularMarketPrice { get; set; }
 }
