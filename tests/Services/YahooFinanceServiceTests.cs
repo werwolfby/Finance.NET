@@ -584,6 +584,67 @@ public class YahooFinanceServiceTests
         Assert.That(merged.Volume, Is.EqualTo(volume));
     }
 
+    /// <summary>
+    /// One daily bar as Yahoo sends it: 2024-07-31, stamped at the New York open.
+    /// </summary>
+    private static string BuildDailyChartJson(int priceHint, double[] prices, long volume)
+        => $$$"""
+            {"chart":{"result":[{
+              "meta":{"symbol":"X","gmtoffset":-14400,"priceHint":{{{priceHint}}}},
+              "timestamp":[1722432600],
+              "indicators":{
+                "quote":[{"open":[{{{Invariant(prices[0])}}}],"high":[{{{Invariant(prices[1])}}}],"low":[{{{Invariant(prices[2])}}}],"close":[{{{Invariant(prices[3])}}}],"volume":[{{{volume}}}]}],
+                "adjclose":[{"adjclose":[{{{Invariant(prices[4])}}}]}]}
+            }],"error":null}}
+            """;
+
+    private static string Invariant(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+
+    private async Task<Record> GetSingleDailyRecordAsync(string json)
+    {
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, json);
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+        var day = new DateTime(2024, 7, 31, 0, 0, 0, DateTimeKind.Utc);
+        return (await service.GetRecordsAsync("X", day, day)).Single();
+    }
+
+    // values as the chart API sends them, and as the history page this replaced showed them
+    [TestCase(2, new[] { 420.5, 421.779998779297, 412.209991455078, 418.350006103516, 411.103149414062 }, new[] { "420.50", "421.78", "412.21", "418.35", "411.10" })]
+    [TestCase(4, new[] { 1.08354103565216, 1.08825767040253, 1.08116292953491, 1.08354103565216, 1.08354103565216 }, new[] { "1.0835", "1.0883", "1.0812", "1.0835", "1.0835" })]
+    public async Task GetRecordsAsync_Prices_ComeAtTheInstrumentsPrecision(int priceHint, double[] prices, string[] expected)
+    {
+        // The chart API sends single-precision prices, which carry noise past the digits Yahoo
+        // shows (priceHint) - 421.779998779297 is 421.78.
+        var record = await GetSingleDailyRecordAsync(BuildDailyChartJson(priceHint, prices, 42891400));
+
+        var actual = new[] { record.Open, record.High, record.Low, record.Close, record.AdjustedClose };
+        Assert.That(actual.Select(price => price?.ToString(CultureInfo.InvariantCulture)), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_ZeroVolume_IsNoVolume()
+    {
+        // Currencies and funds have no volume, which Yahoo sends as 0 - the history page showed
+        // none, so the record carries none.
+        var record = await GetSingleDailyRecordAsync(BuildDailyChartJson(4, [1.0835, 1.0883, 1.0812, 1.0835, 1.0835], 0));
+
+        Assert.That(record.Volume, Is.Null);
+    }
+
+    [Test]
+    public async Task GetRecordsAsync_Date_CarriesNoTimeZone()
+    {
+        // A record's date is the exchange's calendar day, not an instant in UTC.
+        var record = await GetSingleDailyRecordAsync(BuildDailyChartJson(2, [420.5, 421.78, 412.21, 418.35, 411.1], 42891400));
+
+        Assert.That(record.Date, Is.EqualTo(new DateTime(2024, 7, 31, 0, 0, 0, DateTimeKind.Unspecified)));
+        Assert.That(record.Date.Kind, Is.EqualTo(DateTimeKind.Unspecified));
+    }
+
     [Test]
     public async Task GetRecordsAsync_NewestDayWithoutClose_TakesYahoosLatestPrice()
     {

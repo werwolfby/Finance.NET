@@ -514,13 +514,14 @@ public class YahooFinanceService : IYahooFinanceService
             return records;
         }
         var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
+        var priceHint = chartResult.Meta?.PriceHint;
         var adjClose = chartResult.Indicators?.AdjClose?.FirstOrDefault()?.AdjClose;
         var dividends = TotalEventsByPeriod(chartResult.Events?.Dividends, e => e.Date, e => ToDecimal(e.Amount), (a, b) => a + b, offset, interval);
         var splits = TotalEventsByPeriod(chartResult.Events?.Splits, e => e.Date, ToSplitCoefficient, (a, b) => a * b, offset, interval);
 
         for (var i = 0; i < timestamps.Count; i++)
         {
-            var day = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset).Date;
+            var day = ToExchangeDate(timestamps[i], offset);
             var close = ElementAtOrNull(quote.Close, i)
                 ?? (interval == EYahooInterval.Daily && i == timestamps.Count - 1 ? GetPendingClose(chartResult.Meta, quote, i, day, offset) : null);
             if (close == null)
@@ -538,12 +539,13 @@ public class YahooFinanceService : IYahooFinanceService
             var record = new Record
             {
                 Date = date,
-                Open = ToDecimal(ElementAtOrNull(quote.Open, i)),
-                High = ToDecimal(ElementAtOrNull(quote.High, i)),
-                Low = ToDecimal(ElementAtOrNull(quote.Low, i)),
-                Close = ToDecimal(close),
-                AdjustedClose = ToDecimal(ElementAtOrNull(adjClose, i)) ?? ToDecimal(close),
-                Volume = ElementAtOrNull(quote.Volume, i),
+                Open = ToPrice(ElementAtOrNull(quote.Open, i), priceHint),
+                High = ToPrice(ElementAtOrNull(quote.High, i), priceHint),
+                Low = ToPrice(ElementAtOrNull(quote.Low, i), priceHint),
+                Close = ToPrice(close, priceHint),
+                AdjustedClose = ToPrice(ElementAtOrNull(adjClose, i) ?? close, priceHint),
+                // Yahoo sends "no volume" - currencies, funds, days nothing traded - as 0
+                Volume = ElementAtOrNull(quote.Volume, i) is > 0 and var volume ? volume : null,
                 Dividend = dividends.TryGetValue(date, out var dividend) ? dividend : null,
                 SplitCoefficient = splits.TryGetValue(date, out var split) ? split : null,
             };
@@ -643,8 +645,7 @@ public class YahooFinanceService : IYahooFinanceService
             {
                 continue;
             }
-            var date = (Helper.UnixToDateTime(getDate(item)) ?? DateTime.UnixEpoch).Add(offset).Date;
-            var period = GetPeriodStart(date, interval);
+            var period = GetPeriodStart(ToExchangeDate(getDate(item), offset), interval);
             totals[period] = totals.TryGetValue(period, out var total) ? combine(total, value.Value) : value.Value;
         }
         return totals;
@@ -656,6 +657,28 @@ public class YahooFinanceService : IYahooFinanceService
             : null;
 
     private static decimal? ToDecimal(double? value) => value == null ? null : (decimal)value.Value;
+
+    /// <summary>
+    /// A price at the precision Yahoo shows the instrument with - 421.78, not the 421.779998779297
+    /// its single-precision value carries - with trailing zeros kept, as in 420.50.
+    /// </summary>
+    private static decimal? ToPrice(double? value, int? priceHint)
+    {
+        var price = ToDecimal(value);
+        if (price == null || priceHint is not (>= 0 and <= 10))
+        {
+            return price;
+        }
+        var zeroAtThatScale = new decimal(0, 0, 0, false, (byte)priceHint.Value);
+        return decimal.Round(price.Value, priceHint.Value, MidpointRounding.AwayFromZero) + zeroAtThatScale;
+    }
+
+    /// <summary>
+    /// The exchange's calendar day a timestamp falls on. It is a day, not an instant, so it carries
+    /// no time zone.
+    /// </summary>
+    private static DateTime ToExchangeDate(long unixTime, TimeSpan offset)
+        => DateTime.SpecifyKind((Helper.UnixToDateTime(unixTime) ?? DateTime.UnixEpoch).Add(offset).Date, DateTimeKind.Unspecified);
 
     private async Task CheckAndDeclineConsentAsync(IHtmlDocument document, CancellationToken token)
     {

@@ -27,4 +27,10 @@ internal record ChartMeta
     /// </summary>
     [JsonProperty("regularMarketPrice")]
     public double? RegularMarketPrice { get; set; }
+
+    /// <summary>
+    /// How many decimals Yahoo shows the instrument's prices with.
+    /// </summary>
+    [JsonProperty("priceHint")]
+    public int? PriceHint { get; set; }
 }
