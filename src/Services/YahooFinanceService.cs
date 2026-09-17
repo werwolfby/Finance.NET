@@ -270,12 +270,11 @@ public class YahooFinanceService : IYahooFinanceService
         _ => throw new FinanceNetException($"Unsupported interval {interval}"),
     };
 
-    private static bool IsLivePrint(IntradayRecord candidate, IntradayRecord previous, TimeSpan barLength)
+    private static bool IsLivePrint(IntradayRecord candidate, IntradayRecord previous)
         => candidate.Volume == 0
             // a single price: open and close lie within [low, high], so a range of zero pins all four
             && candidate.High <= candidate.Low
-            && candidate.DateTime > previous.DateTime
-            && candidate.DateTime <= previous.DateTime + barLength;
+            && candidate.DateTime > previous.DateTime;
 
     private static TimeSpan GetBarLength(EInterval interval) => interval switch
     {
@@ -317,6 +316,7 @@ public class YahooFinanceService : IYahooFinanceService
             return records;
         }
         var offset = TimeSpan.FromSeconds(chartResult.Meta?.GmtOffset ?? 0);
+        var priceHint = chartResult.Meta?.PriceHint;
 
         for (var i = 0; i < timestamps.Count; i++)
         {
@@ -329,7 +329,7 @@ public class YahooFinanceService : IYahooFinanceService
                 // Yahoo emits null columns for halted or untraded buckets
                 continue;
             }
-            var dateTime = (Helper.UnixToDateTime(timestamps[i]) ?? DateTime.UnixEpoch).Add(offset);
+            var dateTime = ToExchangeTime(timestamps[i], offset);
             if (dateTime.Date < startDate || dateTime.Date > endDate)
             {
                 continue;
@@ -337,25 +337,36 @@ public class YahooFinanceService : IYahooFinanceService
             var record = new IntradayRecord
             {
                 DateTime = dateTime,
-                Open = open.Value,
-                High = high.Value,
-                Low = low.Value,
-                Close = close.Value,
+                Open = ToPrice(open.Value, priceHint),
+                High = ToPrice(high.Value, priceHint),
+                Low = ToPrice(low.Value, priceHint),
+                Close = ToPrice(close.Value, priceHint),
                 Volume = ElementAtOrNull(quote.Volume, i) ?? 0,
             };
 
             // Yahoo appends the latest price as a bar of its own: no volume, a single price, stamped
-            // with its time - inside the bar still being built, or at the close that ends the last
-            // one. It is that bar's latest price, not a bar.
-            if (i == timestamps.Count - 1 && records.Count > 0 && IsLivePrint(record, records[^1], GetBarLength(interval)))
+            // with its time - inside the bar still being built, at the close that ends the last
+            // one, or in a bar Yahoo has not sent yet. It belongs to the bar holding the moment
+            // just before it, so a print on a boundary - a close - ends the bar before that boundary.
+            if (i == timestamps.Count - 1 && records.Count > 0 && IsLivePrint(record, records[^1]))
             {
                 var bar = records[^1];
-                records[^1] = bar with
+                var barLength = GetBarLength(interval);
+                var barsAfter = (record.DateTime - bar.DateTime - TimeSpan.FromTicks(1)).Ticks / barLength.Ticks;
+                if (barsAfter == 0)
                 {
-                    High = Math.Max(bar.High, record.Close),
-                    Low = Math.Min(bar.Low, record.Close),
-                    Close = record.Close,
-                };
+                    records[^1] = bar with
+                    {
+                        High = Math.Max(bar.High, record.Close),
+                        Low = Math.Min(bar.Low, record.Close),
+                        Close = record.Close,
+                    };
+                }
+                else
+                {
+                    // a bar Yahoo has not sent yet, so far - on the grid the bars before it run on
+                    records.Add(record with { DateTime = bar.DateTime + TimeSpan.FromTicks(barsAfter * barLength.Ticks) });
+                }
                 continue;
             }
             records.Add(record);
@@ -673,12 +684,21 @@ public class YahooFinanceService : IYahooFinanceService
         return decimal.Round(price.Value, priceHint.Value, MidpointRounding.AwayFromZero) + zeroAtThatScale;
     }
 
+    /// <inheritdoc cref="ToPrice(double?, int?)"/>
+    private static double ToPrice(double value, int? priceHint)
+        => priceHint is >= 0 and <= 10 ? Math.Round(value, priceHint.Value, MidpointRounding.AwayFromZero) : value;
+
     /// <summary>
-    /// The exchange's calendar day a timestamp falls on. It is a day, not an instant, so it carries
-    /// no time zone.
+    /// The exchange's wall-clock time at a timestamp. It is local to the exchange, not an instant
+    /// in UTC, so it carries no time zone - as Alpha Vantage's intraday times do.
     /// </summary>
-    private static DateTime ToExchangeDate(long unixTime, TimeSpan offset)
-        => DateTime.SpecifyKind((Helper.UnixToDateTime(unixTime) ?? DateTime.UnixEpoch).Add(offset).Date, DateTimeKind.Unspecified);
+    private static DateTime ToExchangeTime(long unixTime, TimeSpan offset)
+        => DateTime.SpecifyKind((Helper.UnixToDateTime(unixTime) ?? DateTime.UnixEpoch).Add(offset), DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The exchange's calendar day a timestamp falls on.
+    /// </summary>
+    private static DateTime ToExchangeDate(long unixTime, TimeSpan offset) => ToExchangeTime(unixTime, offset).Date;
 
     private async Task CheckAndDeclineConsentAsync(IHtmlDocument document, CancellationToken token)
     {
