@@ -184,7 +184,7 @@ public class YahooFinanceService : IYahooFinanceService
                 return chartResult == null
                     ? []
                     // filter against this chunk, so the trailing bar Yahoo appends cannot be added once per chunk
-                    : ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1));
+                    : ParseIntradayRecords(chartResult, startDate, endExclusive.AddDays(-1), interval);
             }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -270,6 +270,23 @@ public class YahooFinanceService : IYahooFinanceService
         _ => throw new FinanceNetException($"Unsupported interval {interval}"),
     };
 
+    private static bool IsLivePrint(IntradayRecord candidate, IntradayRecord previous, TimeSpan barLength)
+        => candidate.Volume == 0
+            // a single price: open and close lie within [low, high], so a range of zero pins all four
+            && candidate.High <= candidate.Low
+            && candidate.DateTime > previous.DateTime
+            && candidate.DateTime <= previous.DateTime + barLength;
+
+    private static TimeSpan GetBarLength(EInterval interval) => interval switch
+    {
+        EInterval.Interval_1Min => TimeSpan.FromMinutes(1),
+        EInterval.Interval_5Min => TimeSpan.FromMinutes(5),
+        EInterval.Interval_15Min => TimeSpan.FromMinutes(15),
+        EInterval.Interval_30Min => TimeSpan.FromMinutes(30),
+        EInterval.Interval_60Min => TimeSpan.FromMinutes(60),
+        _ => throw new FinanceNetException($"Unsupported interval {interval}"),
+    };
+
     /// <summary>
     /// Maps the shared interval enum onto the notation the Yahoo chart endpoint expects ("15m" rather than "15min").
     /// </summary>
@@ -290,7 +307,7 @@ public class YahooFinanceService : IYahooFinanceService
     /// Yahoo appends the current partial bar even when it lies outside the requested period,
     /// so the range is re-applied here rather than trusted from the response.
     /// </remarks>
-    private static List<IntradayRecord> ParseIntradayRecords(ChartResult chartResult, DateTime startDate, DateTime endDate)
+    private static List<IntradayRecord> ParseIntradayRecords(ChartResult chartResult, DateTime startDate, DateTime endDate, EInterval interval)
     {
         var records = new List<IntradayRecord>();
         var timestamps = chartResult.Timestamp;
@@ -317,7 +334,7 @@ public class YahooFinanceService : IYahooFinanceService
             {
                 continue;
             }
-            records.Add(new IntradayRecord
+            var record = new IntradayRecord
             {
                 DateTime = dateTime,
                 Open = open.Value,
@@ -325,7 +342,23 @@ public class YahooFinanceService : IYahooFinanceService
                 Low = low.Value,
                 Close = close.Value,
                 Volume = ElementAtOrNull(quote.Volume, i) ?? 0,
-            });
+            };
+
+            // Yahoo appends the latest price as a bar of its own: no volume, a single price, stamped
+            // with its time - inside the bar still being built, or at the close that ends the last
+            // one. It is that bar's latest price, not a bar.
+            if (i == timestamps.Count - 1 && records.Count > 0 && IsLivePrint(record, records[^1], GetBarLength(interval)))
+            {
+                var bar = records[^1];
+                records[^1] = bar with
+                {
+                    High = Math.Max(bar.High, record.Close),
+                    Low = Math.Min(bar.Low, record.Close),
+                    Close = record.Close,
+                };
+                continue;
+            }
+            records.Add(record);
         }
         return records;
     }

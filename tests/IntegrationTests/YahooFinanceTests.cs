@@ -259,6 +259,19 @@ public class YahooFinanceTests
         Assert.Pass($"cnt = {records.Count}, first = {records[0].DateTime:yyyy-MM-dd HH:mm}, last = {records[^1].DateTime:yyyy-MM-dd HH:mm}");
     }
 
+    [TestCase("MSFT")]
+    [TestCase("8058.T")]
+    [TestCase("BTC-USD")]
+    public async Task GetIntradayRecordsAsync_RecentBars_AreWholeQuarterHoursThatTraded(string symbol)
+    {
+        // Yahoo appends the latest price as a zero-volume bar stamped with its own time - off the
+        // grid while trading, at the close afterwards. It belongs to the bar before it.
+        var records = (await _service.GetIntradayRecordsAsync(symbol, DateTime.UtcNow.Date.AddDays(-4), null, EInterval.Interval_15Min)).ToList();
+
+        Assert.That(records.Select(e => e.DateTime), Has.All.Matches<DateTime>(time => time.Minute % 15 == 0 && time.Second == 0));
+        Assert.That(records[0].Volume, Is.GreaterThan(0));
+    }
+
     [Test]
     public async Task GetIntradayRecordsAsync_ExchangeAheadOfUtc_KeepsTheOpeningBars()
     {

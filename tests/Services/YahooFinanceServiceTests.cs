@@ -1056,6 +1056,78 @@ public class YahooFinanceServiceTests
         Assert.That(result.Select(e => e.DateTime), Is.EquivalentTo(bars.Where(bar => bar.Date >= firstDay && bar.Date <= lastDay)));
     }
 
+    private static IEnumerable<TestCaseData> LivePrintCases()
+    {
+        // taken from Yahoo on 2026-09-16; the last bar of each is the live print
+        yield return new TestCaseData(
+            -4, EInterval.Interval_15Min,
+            new[] { "13:30 493.83 493.93 493.32 493.45 137725", "13:45 493.45 493.74 492.78 493.40 206495", "13:58 493.65 493.65 493.65 493.65 0" },
+            "13:45 493.45 493.74 492.78 493.65 206495")
+            .SetName("{m}(MSFT 15m, during trading)");
+        yield return new TestCaseData(
+            9, EInterval.Interval_15Min,
+            new[] { "15:00 4937 4939 4931 4934 142400", "15:15 4933 4935 4929 4931 123400", "15:30 4944 4944 4944 4944 0" },
+            "15:15 4933 4944 4929 4944 123400")
+            .SetName("{m}(Tokyo 15m, after the close)");
+        yield return new TestCaseData(
+            -4, EInterval.Interval_1Min,
+            new[] { "15:58 489.92 490.34 489.84 490.27 154287", "15:59 490.27 490.63 490.12 490.36 385915", "16:00 490.30 490.30 490.30 490.30 0" },
+            "15:59 490.27 490.63 490.12 490.30 385915")
+            .SetName("{m}(MSFT 1m, after the close)");
+    }
+
+    [TestCaseSource(nameof(LivePrintCases))]
+    public async Task GetIntradayRecordsAsync_LivePrint_IsFoldedIntoItsBar(int gmtOffsetHours, EInterval interval, string[] bars, string expected)
+    {
+        // Yahoo appends the latest price as a bar of its own - no volume, a single price, stamped
+        // with its time: inside the bar still being built, or at the close that ends the last one.
+        // It is that bar's latest price, not a bar.
+        // Arrange
+        var offset = gmtOffsetHours * 3600;
+        var day = DateTime.UtcNow.Date.AddDays(-1);
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(bars.Select(bar => ParseBar(day, bar, offset)), offset));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = (await service.GetIntradayRecordsAsync("X", day, day, interval)).ToList();
+
+        // Assert - newest first
+        var last = ParseBar(day, expected, offset);
+        Assert.That(result, Has.Count.EqualTo(2));
+        Assert.That(result[0].DateTime, Is.EqualTo(DateTime.UnixEpoch.AddSeconds(last.Timestamp + offset)));
+        Assert.That(result[0].Open, Is.EqualTo(last.Open));
+        Assert.That(result[0].High, Is.EqualTo(last.High));
+        Assert.That(result[0].Low, Is.EqualTo(last.Low));
+        Assert.That(result[0].Close, Is.EqualTo(last.Close));
+        Assert.That(result[0].Volume, Is.EqualTo(last.Volume));
+    }
+
+    [Test]
+    public async Task GetIntradayRecordsAsync_LastBarWithVolume_IsKept()
+    {
+        // a bar that traded is a bar, even when it is the newest one
+        // Arrange
+        var offset = -4 * 3600;
+        var day = DateTime.UtcNow.Date.AddDays(-1);
+        var bars = new[] { "13:30 493.83 493.93 493.32 493.45 137725", "13:45 493.45 493.74 492.78 493.40 206495", "14:00 493.65 493.65 493.65 493.65 1200" };
+        SetupHttpResponseCapturingRequests(HttpStatusCode.OK, BuildChartJson(bars.Select(bar => ParseBar(day, bar, offset)), offset));
+        var service = new YahooFinanceService(
+            _mockLogger.Object,
+            _mockHttpClientFactory.Object,
+            _mockPolicyRegistry.Object,
+            _mockYahooSession.Object);
+
+        // Act
+        var result = await service.GetIntradayRecordsAsync("X", day, day, EInterval.Interval_15Min);
+
+        // Assert
+        Assert.That(result.Select(e => e.Volume), Is.EqualTo(new long[] { 1200, 206495, 137725 }));
+    }
+
     [Test]
     public async Task GetIntradayRecordsAsync_OneMinuteChunks_StayWithinYahoosPerRequestSpan()
     {
@@ -1294,21 +1366,40 @@ public class YahooFinanceServiceTests
     }
 
     private static string BuildChartJson(IEnumerable<long> timestamps, int gmtOffsetSeconds, string events = null)
+        => BuildChartJson(timestamps.Select(unixTime => new ChartBar(unixTime, 1.0, 1.0, 1.0, 1.0, 100)), gmtOffsetSeconds, events);
+
+    private static string BuildChartJson(IEnumerable<ChartBar> bars, int gmtOffsetSeconds, string events = null)
     {
-        var stamps = timestamps.Select(unixTime => unixTime.ToString(CultureInfo.InvariantCulture)).ToList();
-        var prices = string.Join(",", stamps.Select(_ => "1.0"));
-        var volumes = string.Join(",", stamps.Select(_ => "100"));
+        var rows = bars.ToList();
+        string Column<T>(Func<ChartBar, T> value) where T : IFormattable
+            => string.Join(",", rows.Select(row => value(row).ToString(null, CultureInfo.InvariantCulture)));
         return "{\"chart\":{\"result\":[{"
             + "\"meta\":{\"symbol\":\"MSFT\",\"gmtoffset\":" + gmtOffsetSeconds.ToString(CultureInfo.InvariantCulture) + "},"
-            + "\"timestamp\":[" + string.Join(",", stamps) + "],"
+            + "\"timestamp\":[" + Column(row => row.Timestamp) + "],"
             + (events == null ? "" : "\"events\":" + events + ",")
             + "\"indicators\":{\"quote\":[{"
-            + "\"open\":[" + prices + "],"
-            + "\"high\":[" + prices + "],"
-            + "\"low\":[" + prices + "],"
-            + "\"close\":[" + prices + "],"
-            + "\"volume\":[" + volumes + "]}]}}],"
+            + "\"open\":[" + Column(row => row.Open) + "],"
+            + "\"high\":[" + Column(row => row.High) + "],"
+            + "\"low\":[" + Column(row => row.Low) + "],"
+            + "\"close\":[" + Column(row => row.Close) + "],"
+            + "\"volume\":[" + Column(row => row.Volume) + "]}]}}],"
             + "\"error\":null}}";
+    }
+
+    private sealed record ChartBar(long Timestamp, double Open, double High, double Low, double Close, long Volume);
+
+    /// <summary>
+    /// Reads "HH:mm open high low close volume", a bar at that exchange-local time on <paramref name="day"/>.
+    /// </summary>
+    private static ChartBar ParseBar(DateTime day, string bar, int gmtOffsetSeconds)
+    {
+        var parts = bar.Split(' ');
+        var localTime = day + TimeSpan.Parse(parts[0], CultureInfo.InvariantCulture);
+        double Price(int index) => double.Parse(parts[index], CultureInfo.InvariantCulture);
+        return new ChartBar(
+            Helper.ToUnixTime(localTime).Value - gmtOffsetSeconds,
+            Price(1), Price(2), Price(3), Price(4),
+            long.Parse(parts[5], CultureInfo.InvariantCulture));
     }
 
     private const int NewYorkSummerOffset = -4 * 3600;
